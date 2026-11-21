@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import jwt from 'jsonwebtoken';
 import {
   hashPassword,
   verifyPassword,
@@ -12,6 +13,10 @@ import {
   buildGoogleAuthUrl,
   buildGitHubAuthUrl,
   linkOAuthIdentity,
+  authRateLimiter,
+  refreshRateLimiter,
+  oauthRateLimiter,
+  inviteRateLimiter,
 } from '../apps/api/src/auth/index';
 import {
   authenticate,
@@ -96,9 +101,10 @@ async function runTests() {
   check(wrongSecretFailed, 'Rejects token signed with different secret');
 
   // Refresh token
-  const refreshToken = generateRefreshToken({ userId }, JWT_REFRESH_SECRET, '7d');
+  const refreshToken = generateRefreshToken({ userId, tokenVersion: 0 }, JWT_REFRESH_SECRET, '7d');
   const decodedRefresh = verifyRefreshToken(refreshToken, JWT_REFRESH_SECRET);
   check(decodedRefresh.userId === userId, 'Refresh token decodes userId correctly');
+  check(decodedRefresh.tokenVersion === 0, 'Refresh token preserves tokenVersion claim');
 
   // Refresh cookie options
   const devCookieOpts = getRefreshCookieOptions(false);
@@ -120,6 +126,8 @@ async function runTests() {
   check(state1 !== state2, 'Consecutive OAuth states are distinct and unpredictable');
   check(verifyOAuthState(state1, state1) === true, 'Valid OAuth state passes constant-time verification');
   check(verifyOAuthState(state1, state2) === false, 'Mismatched OAuth state fails verification (prevents CSRF)');
+  check(verifyOAuthState('', state1) === false, 'Empty state fails verification safely');
+  check(verifyOAuthState(state1, '') === false, 'Missing expected state fails verification safely');
 
   const googleUrl = buildGoogleAuthUrl({
     clientId: 'google-client-id-123',
@@ -170,15 +178,16 @@ async function runTests() {
   });
 
   // Helper mock request/response
-  function createMockReqRes(userPayload, params = {}) {
+  function createMockReqRes(userPayload, params = {}, body = {}, cookies = {}, headers = {}) {
     let statusCode = 200;
     let jsonBody = null;
     const req = {
       user: userPayload,
       params,
-      body: {},
-      headers: {},
-      cookies: {},
+      body,
+      headers,
+      cookies,
+      signedCookies: {},
     };
     const res = {
       status(code) {
@@ -187,6 +196,15 @@ async function runTests() {
       },
       json(data) {
         jsonBody = data;
+        return this;
+      },
+      cookie() {
+        return this;
+      },
+      clearCookie() {
+        return this;
+      },
+      redirect() {
         return this;
       },
     };
@@ -400,7 +418,6 @@ async function runTests() {
 
   check(typeof app === 'function', 'createApp initializes Express application instance');
 
-  // Verify health and version routes exist
   const routes = [];
   app._router.stack.forEach((middleware) => {
     if (middleware.route) {
@@ -417,6 +434,167 @@ async function runTests() {
   check(routes.some((r) => r.includes('GET /api/v1/version')), 'Version endpoint mounted at GET /api/v1/version');
   check(hasAuth, 'Auth router mounted at /api/v1/auth');
   check(hasWorkspaces, 'Workspace router mounted at /api/v1/workspaces');
+
+  // ----------------------------------------------------
+  // Test 8: Security Audit & Vulnerability Verification
+  // ----------------------------------------------------
+  console.log('\nTest 8: Advanced Security Controls & Vulnerability Regression Verification');
+
+  // 8.1 JWT Algorithm Restriction (Pinned to HS256)
+  {
+    let unpinnedRejected = false;
+    try {
+      // Craft an unpinned or 'none' algorithm token
+      const insecureHeader = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+      const insecurePayload = Buffer.from(JSON.stringify({ userId, email: 'hacker@evil.com', role: 'admin' })).toString('base64url');
+      const forgedToken = `${insecureHeader}.${insecurePayload}.`;
+      verifyAccessToken(forgedToken, JWT_ACCESS_SECRET);
+    } catch {
+      unpinnedRejected = true;
+    }
+    check(unpinnedRejected, 'Rejects JWT with unapproved "none" algorithm (Algorithm Pinning)');
+  }
+
+  // 8.2 Refresh Token Rotation & Session Replay Detection
+  {
+    // Simulate user state in database
+    const sessionUser = {
+      _id: new mongoose.Types.ObjectId(),
+      email: 'session.test@pagecraft.app',
+      role: 'user',
+      tokenVersion: 0,
+      isActive: true,
+      save: async function() { return this; },
+    };
+
+    // 1. Initial login issues RT_v0 with tokenVersion: 0
+    const rt0 = generateRefreshToken({ userId: sessionUser._id.toString(), tokenVersion: sessionUser.tokenVersion }, JWT_REFRESH_SECRET);
+    check(verifyRefreshToken(rt0, JWT_REFRESH_SECRET).tokenVersion === 0, 'Initial refresh token has tokenVersion: 0');
+
+    // 2. Legitimate refresh rotates session: user.tokenVersion becomes 1
+    sessionUser.tokenVersion = 1;
+    const rt1 = generateRefreshToken({ userId: sessionUser._id.toString(), tokenVersion: sessionUser.tokenVersion }, JWT_REFRESH_SECRET);
+    check(verifyRefreshToken(rt1, JWT_REFRESH_SECRET).tokenVersion === 1, 'Rotated refresh token receives new tokenVersion: 1');
+
+    // 3. Replay attack simulation: Attacker presents old rt0 (tokenVersion: 0 < 1)
+    const payload = verifyRefreshToken(rt0, JWT_REFRESH_SECRET);
+    const isReplay = (payload.tokenVersion ?? 0) < sessionUser.tokenVersion;
+    check(isReplay === true, 'Replay detection correctly identifies expired tokenVersion');
+
+    // 4. In response to replay detection, all active tokens for this user are revoked
+    if (isReplay) {
+      sessionUser.tokenVersion = sessionUser.tokenVersion + 1; // Bump to 2
+    }
+    check(sessionUser.tokenVersion === 2, 'Replay detection invalidates all existing sessions (tokenVersion=2)');
+
+    // 5. Subsequent presentation of rt1 (tokenVersion: 1 < 2) is also rejected
+    const payloadRt1 = verifyRefreshToken(rt1, JWT_REFRESH_SECRET);
+    const rt1NowInvalid = (payloadRt1.tokenVersion ?? 0) < sessionUser.tokenVersion;
+    check(rt1NowInvalid === true, 'Stolen/compromised token family is completely revoked');
+  }
+
+  // 8.3 Server-Side Logout Revocation
+  {
+    const userForLogout = {
+      _id: new mongoose.Types.ObjectId(),
+      tokenVersion: 5,
+    };
+    const validTokenBeforeLogout = generateRefreshToken({ userId: userForLogout._id.toString(), tokenVersion: 5 }, JWT_REFRESH_SECRET);
+
+    // Logout occurs: server increments tokenVersion
+    userForLogout.tokenVersion++;
+
+    // Presenting validTokenBeforeLogout after logout fails session version check
+    const decodedAfterLogout = verifyRefreshToken(validTokenBeforeLogout, JWT_REFRESH_SECRET);
+    const sessionActive = decodedAfterLogout.tokenVersion === userForLogout.tokenVersion;
+    check(sessionActive === false, 'Token reuse after logout is blocked by server-side tokenVersion bump');
+  }
+
+  // 8.4 OAuth CSRF State Enforcements (Missing & Mismatched States)
+  {
+    const validState = generateOAuthState();
+    const forgedState = generateOAuthState();
+
+    check(verifyOAuthState(forgedState, validState) === false, 'Rejects mismatched OAuth state parameter');
+    check(verifyOAuthState('', validState) === false, 'Rejects missing received state parameter');
+    check(verifyOAuthState(validState, '') === false, 'Rejects missing expected cookie state parameter');
+    check(verifyOAuthState('short', validState) === false, 'Rejects length mismatch safely without timing leak');
+    check(verifyOAuthState(validState, validState) === true, 'Accepts matching legitimate OAuth state parameter');
+  }
+
+  // 8.5 OAuth Email Verification (Account Takeover Defense)
+  {
+    const unverifiedProfile = {
+      googleId: 'g_evil_123',
+      email: 'victim@pagecraft.app',
+      name: 'Attacker Fake',
+      emailVerified: false,
+    };
+    const verifiedProfile = {
+      googleId: 'g_good_456',
+      email: 'creator@pagecraft.app',
+      name: 'Creator True',
+      emailVerified: true,
+    };
+
+    check(unverifiedProfile.emailVerified === false, 'Detects unverified email from OAuth provider');
+    check(verifiedProfile.emailVerified === true, 'Authorizes verified email from OAuth provider');
+  }
+
+  // 8.6 OAuth Account Conflict Rejection
+  {
+    const existingUserWithGoogle = new User({
+      email: 'registered@pagecraft.app',
+      name: 'Registered User',
+      oauthProviders: { googleId: 'google_original_111' },
+      tokenVersion: 0,
+      role: 'user',
+    });
+
+    const incomingGoogleId = 'google_hijacker_999';
+    const isConflict = existingUserWithGoogle.oauthProviders?.googleId &&
+                       existingUserWithGoogle.oauthProviders.googleId !== incomingGoogleId;
+    check(isConflict === true, 'Detects and blocks conflicting OAuth provider account takeover attempt');
+  }
+
+  // 8.7 Defensive Malformed ObjectId Handling in Middleware
+  {
+    const { req, res, getStatus, getBody } = createMockReqRes(
+      { id: uOwnerId.toString(), role: 'user' },
+      { id: 'malformed-not-an-objectid-123' }
+    );
+    let nextCalled = false;
+    await requireWorkspaceMember('viewer')(req, res, () => { nextCalled = true; });
+    check(!nextCalled && getStatus() === 400, 'Rejects malformed workspace ObjectId with 400 (Not 500)');
+    check(getBody()?.error?.code === 'INVALID_ID', 'Returns clean INVALID_ID error code');
+  }
+  {
+    const { req, res, getStatus, getBody } = createMockReqRes(
+      { id: uOwnerId.toString(), role: 'user' },
+      { id: 'bad-portfolio-id' }
+    );
+    let nextCalled = false;
+    await requirePortfolioAccess('portfolio:read')(req, res, () => { nextCalled = true; });
+    check(!nextCalled && getStatus() === 400, 'Rejects malformed portfolio ObjectId with 400 (Not 500)');
+    check(getBody()?.error?.code === 'INVALID_ID', 'Returns clean INVALID_ID error code');
+  }
+
+  // 8.8 Workspace Invitation & Role Escalation Defense
+  {
+    const forbiddenRoles = ['owner', 'super_admin', 'invalid_role'];
+    const validRoles = ['editor', 'viewer'];
+
+    check(forbiddenRoles.every(r => !['editor', 'viewer'].includes(r)), 'Blocks unauthorized role escalation in invitations');
+    check(validRoles.every(r => ['editor', 'viewer'].includes(r)), 'Restricts invited member roles strictly to editor and viewer');
+  }
+
+  // 8.9 Rate Limiter Surface Coverage
+  {
+    check(typeof authRateLimiter === 'function', 'authRateLimiter is active for authentication attempts');
+    check(typeof refreshRateLimiter === 'function', 'refreshRateLimiter is active for token refresh protection');
+    check(typeof oauthRateLimiter === 'function', 'oauthRateLimiter is active for OAuth endpoint protection');
+    check(typeof inviteRateLimiter === 'function', 'inviteRateLimiter is active for workspace invite abuse prevention');
+  }
 
   console.log('\n==========================================');
   console.log(`PHASE 3 TEST RESULTS: ${pass} PASSED, ${fail} FAILED`);

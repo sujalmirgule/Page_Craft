@@ -20,6 +20,7 @@ export interface User {
   avatarUrl?: string;
   plan: PlanTier;
   role: UserRole;
+  tokenVersion?: number;
   oauthProviders?: OAuthProviders;
   razorpayCustomerId?: string;
   subscriptionExpiresAt?: string;

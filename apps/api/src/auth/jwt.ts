@@ -10,6 +10,7 @@ export interface AuthTokenPayload {
 
 export interface RefreshTokenPayload {
   userId: string;
+  tokenVersion?: number;
 }
 
 /**
@@ -24,6 +25,7 @@ export function generateAccessToken(
     expiresIn: expiresIn as any,
     issuer: 'pagecraft.app',
     audience: 'pagecraft-client',
+    algorithm: 'HS256',
   };
   return jwt.sign(payload, secret, options);
 }
@@ -40,6 +42,7 @@ export function generateRefreshToken(
     expiresIn: expiresIn as any,
     issuer: 'pagecraft.app',
     audience: 'pagecraft-refresh',
+    algorithm: 'HS256',
   };
   return jwt.sign(payload, secret, options);
 }
@@ -51,6 +54,7 @@ export function verifyAccessToken(token: string, secret: string): AuthTokenPaylo
   return jwt.verify(token, secret, {
     issuer: 'pagecraft.app',
     audience: 'pagecraft-client',
+    algorithms: ['HS256'],
   }) as AuthTokenPayload;
 }
 
@@ -61,6 +65,7 @@ export function verifyRefreshToken(token: string, secret: string): RefreshTokenP
   return jwt.verify(token, secret, {
     issuer: 'pagecraft.app',
     audience: 'pagecraft-refresh',
+    algorithms: ['HS256'],
   }) as RefreshTokenPayload;
 }
 

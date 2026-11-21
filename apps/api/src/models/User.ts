@@ -8,6 +8,7 @@ export interface IUserDocument extends Document {
   avatarUrl?: string;
   plan: PlanTier;
   role: UserRole;
+  tokenVersion: number;
   oauthProviders: {
     googleId?: string;
     githubId?: string;
@@ -63,6 +64,10 @@ const UserSchema = new Schema<IUserDocument, IUserModel>(
       default: 'user',
       index: true,
     },
+    tokenVersion: {
+      type: Number,
+      default: 0,
+    },
     oauthProviders: {
       googleId: {
         type: String,
@@ -104,6 +109,7 @@ UserSchema.statics.findByEmail = function (email: string) {
 UserSchema.set('toJSON', {
   transform: (_doc, ret: Record<string, any>) => {
     delete ret.passwordHash;
+    delete ret.tokenVersion;
     delete ret.__v;
     return ret;
   },

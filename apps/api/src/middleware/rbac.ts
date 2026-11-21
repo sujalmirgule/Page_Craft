@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import mongoose from 'mongoose';
 import { Workspace, IWorkspaceDocument } from '../models/Workspace';
 import { Portfolio, IPortfolioDocument } from '../models/Portfolio';
 import { can, Action } from '@pagecraft/permissions';
@@ -53,6 +54,14 @@ export function requireWorkspaceMember(minimumRole: WorkspaceRole = 'viewer') {
         res.status(400).json({
           success: false,
           error: { code: 'BAD_REQUEST', message: 'Workspace identifier is required' },
+        });
+        return;
+      }
+
+      if (!mongoose.isValidObjectId(workspaceId)) {
+        res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_ID', message: 'Workspace identifier must be a valid MongoDB ObjectId' },
         });
         return;
       }
@@ -132,6 +141,14 @@ export function requirePortfolioAccess(action: Action) {
         res.status(400).json({
           success: false,
           error: { code: 'BAD_REQUEST', message: 'Portfolio identifier is required' },
+        });
+        return;
+      }
+
+      if (!mongoose.isValidObjectId(portfolioId)) {
+        res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_ID', message: 'Portfolio identifier must be a valid MongoDB ObjectId' },
         });
         return;
       }

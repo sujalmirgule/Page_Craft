@@ -3,6 +3,7 @@ import { Workspace } from '../models/Workspace';
 import { User } from '../models/User';
 import { authenticate } from '../middleware/authenticate';
 import { requireWorkspaceMember } from '../middleware/rbac';
+import { inviteRateLimiter } from '../auth/rate-limiter';
 import type { ApiResponse, WorkspaceRole } from '@pagecraft/types';
 import mongoose from 'mongoose';
 
@@ -101,13 +102,13 @@ export function createWorkspaceRouter(jwtAccessSecret: string): Router {
   // ----------------------------------------------------
   // POST /api/v1/workspaces/:id/invites — Invite member
   // ----------------------------------------------------
-  router.post('/:id/invites', requireWorkspaceMember('owner'), async (req: Request, res: Response): Promise<void> => {
+  router.post('/:id/invites', inviteRateLimiter, requireWorkspaceMember('owner'), async (req: Request, res: Response): Promise<void> => {
     try {
       const { email, role } = req.body;
-      if (!email || !role || !['owner', 'editor', 'viewer'].includes(role)) {
+      if (!email || !role || !['editor', 'viewer'].includes(role)) {
         res.status(400).json({
           success: false,
-          error: { code: 'BAD_REQUEST', message: 'Valid email and role (owner, editor, viewer) are required' },
+          error: { code: 'BAD_REQUEST', message: 'Valid email and role (editor, viewer) are required' },
         });
         return;
       }
@@ -157,16 +158,24 @@ export function createWorkspaceRouter(jwtAccessSecret: string): Router {
       const { userId } = req.params;
       const { role } = req.body;
 
-      if (!role || !['owner', 'editor', 'viewer'].includes(role)) {
+      if (!mongoose.isValidObjectId(userId)) {
         res.status(400).json({
           success: false,
-          error: { code: 'BAD_REQUEST', message: 'Valid role (owner, editor, viewer) is required' },
+          error: { code: 'INVALID_ID', message: 'Member userId must be a valid MongoDB ObjectId' },
+        });
+        return;
+      }
+
+      if (!role || !['editor', 'viewer'].includes(role)) {
+        res.status(400).json({
+          success: false,
+          error: { code: 'BAD_REQUEST', message: 'Valid role (editor, viewer) is required' },
         });
         return;
       }
 
       const workspace = req.workspace!;
-      if (workspace.ownerId.toString() === userId && role !== 'owner') {
+      if (workspace.ownerId.toString() === userId) {
         res.status(400).json({
           success: false,
           error: { code: 'CANNOT_DEMOTE_OWNER', message: 'Cannot demote the primary workspace owner' },
@@ -204,6 +213,15 @@ export function createWorkspaceRouter(jwtAccessSecret: string): Router {
   router.delete('/:id/members/:userId', requireWorkspaceMember('owner'), async (req: Request, res: Response): Promise<void> => {
     try {
       const { userId } = req.params;
+
+      if (!mongoose.isValidObjectId(userId)) {
+        res.status(400).json({
+          success: false,
+          error: { code: 'INVALID_ID', message: 'Member userId must be a valid MongoDB ObjectId' },
+        });
+        return;
+      }
+
       const workspace = req.workspace!;
 
       if (workspace.ownerId.toString() === userId) {

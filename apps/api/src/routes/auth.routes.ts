@@ -15,11 +15,18 @@ import {
   buildGitHubAuthUrl,
   linkOAuthIdentity,
 } from '../auth/oauth';
-import { authRateLimiter } from '../auth/rate-limiter';
+import {
+  authRateLimiter,
+  refreshRateLimiter,
+  oauthRateLimiter,
+} from '../auth/rate-limiter';
 import { authenticate } from '../middleware/authenticate';
 import { validateBody } from '../middleware/validate';
 import { UserRegisterValidator, UserLoginValidator } from '@pagecraft/validation';
 import type { ApiResponse } from '@pagecraft/types';
+
+// Pre-computed 12-round bcrypt hash used to normalize execution timing on nonexistent user lookups
+const DUMMY_BCRYPT_HASH = '$2a$12$e8N4W8qZ4qUjC7N3U6yQau8QYF1a2a4z0b8qZ4qUjC7N3U6yQau8Q';
 
 export function createAuthRouter(config: {
   jwtAccessSecret: string;
@@ -59,16 +66,17 @@ export function createAuthRouter(config: {
           return;
         }
 
-        // 2. Hash password
+        // 2. Hash password with bcrypt (12 rounds)
         const passwordHash = await hashPassword(password);
 
-        // 3. Create User record
+        // 3. Create User record with initial tokenVersion: 0
         const user = new User({
           email: normalizedEmail,
           passwordHash,
           name: name.trim(),
           plan: 'free',
           role: 'user',
+          tokenVersion: 0,
         });
         await user.save();
 
@@ -88,12 +96,15 @@ export function createAuthRouter(config: {
         });
         await defaultWorkspace.save();
 
-        // 5. Generate tokens
+        // 5. Generate short-lived access token and initial refresh token
         const accessToken = generateAccessToken(
           { userId: user._id.toString(), email: user.email, role: user.role },
           jwtAccessSecret
         );
-        const refreshToken = generateRefreshToken({ userId: user._id.toString() }, jwtRefreshSecret);
+        const refreshToken = generateRefreshToken(
+          { userId: user._id.toString(), tokenVersion: user.tokenVersion || 0 },
+          jwtRefreshSecret
+        );
 
         // 6. Set HTTP-only refresh cookie
         res.cookie('refresh_token', refreshToken, getRefreshCookieOptions(isProduction));
@@ -101,12 +112,14 @@ export function createAuthRouter(config: {
         const response: ApiResponse<{
           user: any;
           accessToken: string;
+          refreshToken?: string;
           defaultWorkspace: any;
         }> = {
           success: true,
           data: {
             user: user.toJSON(),
             accessToken,
+            refreshToken,
             defaultWorkspace,
           },
           meta: {
@@ -118,7 +131,7 @@ export function createAuthRouter(config: {
       } catch (err: any) {
         res.status(500).json({
           success: false,
-          error: { code: 'REGISTER_ERROR', message: err.message },
+          error: { code: 'REGISTER_ERROR', message: isProduction ? 'Failed to complete registration' : err.message },
         });
       }
     }
@@ -138,8 +151,10 @@ export function createAuthRouter(config: {
 
         // 1. Explicitly select passwordHash
         const user = await User.findOne({ email: normalizedEmail }).select('+passwordHash');
+
+        // Timing Attack Mitigation: If user doesn't exist, execute dummy bcrypt verification
         if (!user || !user.passwordHash) {
-          // Standardized response prevents account enumeration
+          await verifyPassword(password, DUMMY_BCRYPT_HASH);
           res.status(401).json({
             success: false,
             error: {
@@ -174,12 +189,15 @@ export function createAuthRouter(config: {
           return;
         }
 
-        // 3. Generate tokens
+        // 3. Generate tokens with current tokenVersion
         const accessToken = generateAccessToken(
           { userId: user._id.toString(), email: user.email, role: user.role },
           jwtAccessSecret
         );
-        const refreshToken = generateRefreshToken({ userId: user._id.toString() }, jwtRefreshSecret);
+        const refreshToken = generateRefreshToken(
+          { userId: user._id.toString(), tokenVersion: user.tokenVersion || 0 },
+          jwtRefreshSecret
+        );
 
         // 4. Set HTTP-only refresh cookie
         res.cookie('refresh_token', refreshToken, getRefreshCookieOptions(isProduction));
@@ -189,6 +207,7 @@ export function createAuthRouter(config: {
           data: {
             user: user.toJSON(),
             accessToken,
+            refreshToken,
           },
           meta: {
             timestamp: new Date().toISOString(),
@@ -198,18 +217,18 @@ export function createAuthRouter(config: {
       } catch (err: any) {
         res.status(500).json({
           success: false,
-          error: { code: 'LOGIN_ERROR', message: err.message },
+          error: { code: 'LOGIN_ERROR', message: isProduction ? 'Failed to process login' : err.message },
         });
       }
     }
   );
 
   // ----------------------------------------------------
-  // POST /api/v1/auth/refresh
+  // POST /api/v1/auth/refresh (Rotation & Replay Detection)
   // ----------------------------------------------------
-  router.post('/refresh', async (req: Request, res: Response): Promise<void> => {
+  router.post('/refresh', refreshRateLimiter, async (req: Request, res: Response): Promise<void> => {
     try {
-      const token = req.cookies?.refresh_token || req.body?.refreshToken;
+      const token = req.signedCookies?.refresh_token || req.cookies?.refresh_token || req.body?.refreshToken;
       if (!token) {
         res.status(401).json({
           success: false,
@@ -221,6 +240,7 @@ export function createAuthRouter(config: {
         return;
       }
 
+      // Verify token signature, audience, and HS256 algorithm
       const payload = verifyRefreshToken(token, jwtRefreshSecret);
       const user = await User.findById(payload.userId);
       if (!user || !user.isActive) {
@@ -231,15 +251,50 @@ export function createAuthRouter(config: {
         return;
       }
 
+      const currentVersion = user.tokenVersion || 0;
+      const payloadVersion = payload.tokenVersion ?? 0;
+
+      // REPLAY DETECTION:
+      // If presented tokenVersion is older than current active version, a revoked/replayed token is being used!
+      if (payloadVersion < currentVersion) {
+        // Invalidate all tokens for this user by incrementing tokenVersion again
+        user.tokenVersion = currentVersion + 1;
+        await user.save();
+
+        res.clearCookie('refresh_token', getRefreshCookieOptions(isProduction));
+        res.status(401).json({
+          success: false,
+          error: {
+            code: 'TOKEN_REPLAY_DETECTED',
+            message: 'Refresh token reuse detected. All sessions for this account have been invalidated for security.',
+          },
+        });
+        return;
+      }
+
+      // REFRESH TOKEN ROTATION:
+      // Increment tokenVersion in database to immediately invalidate the presented token
+      user.tokenVersion = currentVersion + 1;
+      await user.save();
+
+      // Issue fresh access token and newly rotated refresh token
       const newAccessToken = generateAccessToken(
         { userId: user._id.toString(), email: user.email, role: user.role },
         jwtAccessSecret
       );
+      const newRefreshToken = generateRefreshToken(
+        { userId: user._id.toString(), tokenVersion: user.tokenVersion },
+        jwtRefreshSecret
+      );
+
+      // Rotate cookie
+      res.cookie('refresh_token', newRefreshToken, getRefreshCookieOptions(isProduction));
 
       res.status(200).json({
         success: true,
         data: {
           accessToken: newAccessToken,
+          refreshToken: newRefreshToken,
         },
         meta: {
           timestamp: new Date().toISOString(),
@@ -251,26 +306,48 @@ export function createAuthRouter(config: {
         success: false,
         error: {
           code: 'INVALID_REFRESH_TOKEN',
-          message: 'Refresh token is expired or invalid',
+          message: 'Refresh token is expired, invalid, or malformed',
         },
       });
     }
   });
 
   // ----------------------------------------------------
-  // POST /api/v1/auth/logout
+  // POST /api/v1/auth/logout (Server-side Session Revocation)
   // ----------------------------------------------------
-  router.post('/logout', (req: Request, res: Response): void => {
-    res.clearCookie('refresh_token', { path: '/api/v1/auth' });
-    res.clearCookie('access_token', { path: '/' });
-    res.status(200).json({
-      success: true,
-      data: { message: 'Logged out successfully' },
-      meta: {
-        timestamp: new Date().toISOString(),
-        version: '1.0.0',
-      },
-    });
+  router.post('/logout', async (req: Request, res: Response): Promise<void> => {
+    try {
+      const token = req.signedCookies?.refresh_token || req.cookies?.refresh_token || req.body?.refreshToken;
+      if (token) {
+        try {
+          const payload = verifyRefreshToken(token, jwtRefreshSecret);
+          if (payload?.userId) {
+            // Revoke active sessions by incrementing tokenVersion
+            await User.findByIdAndUpdate(payload.userId, { $inc: { tokenVersion: 1 } });
+          }
+        } catch {
+          // Token expired or invalid; continue with cookie clearing
+        }
+      }
+
+      // Clear cookies with identical matching flags
+      res.clearCookie('refresh_token', getRefreshCookieOptions(isProduction));
+      res.clearCookie('access_token', { path: '/' });
+
+      res.status(200).json({
+        success: true,
+        data: { message: 'Logged out successfully' },
+        meta: {
+          timestamp: new Date().toISOString(),
+          version: '1.0.0',
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: { code: 'LOGOUT_ERROR', message: 'Failed to process logout' },
+      });
+    }
   });
 
   // ----------------------------------------------------
@@ -293,7 +370,7 @@ export function createAuthRouter(config: {
     } catch (err: any) {
       res.status(500).json({
         success: false,
-        error: { code: 'ME_ERROR', message: err.message },
+        error: { code: 'ME_ERROR', message: isProduction ? 'Failed to retrieve profile' : err.message },
       });
     }
   });
@@ -301,28 +378,40 @@ export function createAuthRouter(config: {
   // ----------------------------------------------------
   // OAuth Handshakes & Verification
   // ----------------------------------------------------
-  router.get('/google', (req: Request, res: Response): void => {
+  router.get('/google', oauthRateLimiter, (req: Request, res: Response): void => {
     const clientId = config.googleClientId || process.env.GOOGLE_CLIENT_ID || 'mock_google_client_id';
     const redirectUri = config.googleCallbackUrl || process.env.GOOGLE_CALLBACK_URL || 'http://localhost:4000/api/v1/auth/google/callback';
     const state = generateOAuthState();
-    res.cookie('oauth_state_google', state, { httpOnly: true, maxAge: 10 * 60 * 1000, secure: isProduction });
+    res.cookie('oauth_state_google', state, {
+      httpOnly: true,
+      maxAge: 10 * 60 * 1000,
+      secure: isProduction,
+      path: '/api/v1/auth',
+      sameSite: 'lax',
+    });
     const authUrl = buildGoogleAuthUrl({ clientId, redirectUri, state });
     res.redirect(authUrl);
   });
 
-  router.get('/google/callback', async (req: Request, res: Response): Promise<void> => {
+  router.get('/google/callback', oauthRateLimiter, async (req: Request, res: Response): Promise<void> => {
     try {
       const { code, state, testUser } = req.query as Record<string, string>;
       const expectedState = req.cookies?.oauth_state_google;
 
-      if (expectedState && state && !verifyOAuthState(state, expectedState)) {
+      // Strict CSRF verification: BOTH state and expectedState must be present and match
+      if (!state || !expectedState || !verifyOAuthState(state, expectedState)) {
         res.status(403).json({
           success: false,
-          error: { code: 'OAUTH_CSRF_FAILED', message: 'OAuth state mismatch. Request may have been forged.' },
+          error: { code: 'OAUTH_CSRF_FAILED', message: 'OAuth state mismatch or missing. Request may have been forged.' },
         });
         return;
       }
-      res.clearCookie('oauth_state_google');
+      res.clearCookie('oauth_state_google', {
+        path: '/api/v1/auth',
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: 'lax',
+      });
 
       // Profile resolution (supports live OAuth exchange or test fixture)
       const googleProfile = testUser
@@ -332,19 +421,34 @@ export function createAuthRouter(config: {
             email: 'google.creator@example.com',
             name: 'Google Creator',
             avatarUrl: 'https://lh3.googleusercontent.com/avatar',
+            emailVerified: true,
           };
 
+      // Verified email validation: Reject unverified emails to prevent account takeover
+      if (googleProfile.emailVerified === false) {
+        res.status(400).json({
+          success: false,
+          error: {
+            code: 'OAUTH_EMAIL_UNVERIFIED',
+            message: 'The email address associated with your Google account is not verified. Account linking denied.',
+          },
+        });
+        return;
+      }
+
+      const normalizedEmail = googleProfile.email.toLowerCase().trim();
       let user = await User.findOne({
-        $or: [{ 'oauthProviders.googleId': googleProfile.googleId }, { email: googleProfile.email.toLowerCase() }],
+        $or: [{ 'oauthProviders.googleId': googleProfile.googleId }, { email: normalizedEmail }],
       });
 
       if (!user) {
         user = new User({
-          email: googleProfile.email.toLowerCase(),
+          email: normalizedEmail,
           name: googleProfile.name,
           avatarUrl: googleProfile.avatarUrl,
           plan: 'free',
           role: 'user',
+          tokenVersion: 0,
           oauthProviders: { googleId: googleProfile.googleId },
         });
         await user.save();
@@ -357,6 +461,18 @@ export function createAuthRouter(config: {
           members: [{ userId: user._id, role: 'owner', joinedAt: new Date() }],
         }).save();
       } else {
+        // Prevent Account Conflict: if user is already linked to a different Google ID
+        if (user.oauthProviders?.googleId && user.oauthProviders.googleId !== googleProfile.googleId) {
+          res.status(409).json({
+            success: false,
+            error: {
+              code: 'OAUTH_ACCOUNT_CONFLICT',
+              message: 'This Pagecraft account is already linked to a different Google identity.',
+            },
+          });
+          return;
+        }
+
         linkOAuthIdentity(user, 'google', googleProfile.googleId);
         if (googleProfile.avatarUrl && !user.avatarUrl) {
           user.avatarUrl = googleProfile.avatarUrl;
@@ -368,7 +484,10 @@ export function createAuthRouter(config: {
         { userId: user._id.toString(), email: user.email, role: user.role },
         jwtAccessSecret
       );
-      const refreshToken = generateRefreshToken({ userId: user._id.toString() }, jwtRefreshSecret);
+      const refreshToken = generateRefreshToken(
+        { userId: user._id.toString(), tokenVersion: user.tokenVersion || 0 },
+        jwtRefreshSecret
+      );
 
       res.cookie('refresh_token', refreshToken, getRefreshCookieOptions(isProduction));
 
@@ -377,39 +496,52 @@ export function createAuthRouter(config: {
         data: {
           user: user.toJSON(),
           accessToken,
+          refreshToken,
           provider: 'google',
         },
       });
     } catch (err: any) {
       res.status(500).json({
         success: false,
-        error: { code: 'OAUTH_ERROR', message: err.message },
+        error: { code: 'OAUTH_ERROR', message: isProduction ? 'OAuth authentication failed' : err.message },
       });
     }
   });
 
-  router.get('/github', (req: Request, res: Response): void => {
+  router.get('/github', oauthRateLimiter, (req: Request, res: Response): void => {
     const clientId = config.githubClientId || process.env.GITHUB_CLIENT_ID || 'mock_github_client_id';
     const redirectUri = config.githubCallbackUrl || process.env.GITHUB_CALLBACK_URL || 'http://localhost:4000/api/v1/auth/github/callback';
     const state = generateOAuthState();
-    res.cookie('oauth_state_github', state, { httpOnly: true, maxAge: 10 * 60 * 1000, secure: isProduction });
+    res.cookie('oauth_state_github', state, {
+      httpOnly: true,
+      maxAge: 10 * 60 * 1000,
+      secure: isProduction,
+      path: '/api/v1/auth',
+      sameSite: 'lax',
+    });
     const authUrl = buildGitHubAuthUrl({ clientId, redirectUri, state });
     res.redirect(authUrl);
   });
 
-  router.get('/github/callback', async (req: Request, res: Response): Promise<void> => {
+  router.get('/github/callback', oauthRateLimiter, async (req: Request, res: Response): Promise<void> => {
     try {
       const { code, state, testUser } = req.query as Record<string, string>;
       const expectedState = req.cookies?.oauth_state_github;
 
-      if (expectedState && state && !verifyOAuthState(state, expectedState)) {
+      // Strict CSRF verification: BOTH state and expectedState must be present and match
+      if (!state || !expectedState || !verifyOAuthState(state, expectedState)) {
         res.status(403).json({
           success: false,
-          error: { code: 'OAUTH_CSRF_FAILED', message: 'OAuth state mismatch. Request may have been forged.' },
+          error: { code: 'OAUTH_CSRF_FAILED', message: 'OAuth state mismatch or missing. Request may have been forged.' },
         });
         return;
       }
-      res.clearCookie('oauth_state_github');
+      res.clearCookie('oauth_state_github', {
+        path: '/api/v1/auth',
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: 'lax',
+      });
 
       const githubProfile = testUser
         ? JSON.parse(Buffer.from(testUser, 'base64').toString())
@@ -418,19 +550,34 @@ export function createAuthRouter(config: {
             email: 'github.developer@example.com',
             name: 'GitHub Developer',
             avatarUrl: 'https://avatars.githubusercontent.com/u/987654321',
+            emailVerified: true,
           };
 
+      // Verified email validation: Reject unverified emails
+      if (githubProfile.emailVerified === false) {
+        res.status(400).json({
+          success: false,
+          error: {
+            code: 'OAUTH_EMAIL_UNVERIFIED',
+            message: 'The email address associated with your GitHub account is not verified. Account linking denied.',
+          },
+        });
+        return;
+      }
+
+      const normalizedEmail = githubProfile.email.toLowerCase().trim();
       let user = await User.findOne({
-        $or: [{ 'oauthProviders.githubId': githubProfile.githubId }, { email: githubProfile.email.toLowerCase() }],
+        $or: [{ 'oauthProviders.githubId': githubProfile.githubId }, { email: normalizedEmail }],
       });
 
       if (!user) {
         user = new User({
-          email: githubProfile.email.toLowerCase(),
+          email: normalizedEmail,
           name: githubProfile.name,
           avatarUrl: githubProfile.avatarUrl,
           plan: 'free',
           role: 'user',
+          tokenVersion: 0,
           oauthProviders: { githubId: githubProfile.githubId },
         });
         await user.save();
@@ -443,6 +590,18 @@ export function createAuthRouter(config: {
           members: [{ userId: user._id, role: 'owner', joinedAt: new Date() }],
         }).save();
       } else {
+        // Prevent Account Conflict: if user is already linked to a different GitHub ID
+        if (user.oauthProviders?.githubId && user.oauthProviders.githubId !== githubProfile.githubId) {
+          res.status(409).json({
+            success: false,
+            error: {
+              code: 'OAUTH_ACCOUNT_CONFLICT',
+              message: 'This Pagecraft account is already linked to a different GitHub identity.',
+            },
+          });
+          return;
+        }
+
         linkOAuthIdentity(user, 'github', githubProfile.githubId);
         if (githubProfile.avatarUrl && !user.avatarUrl) {
           user.avatarUrl = githubProfile.avatarUrl;
@@ -454,7 +613,10 @@ export function createAuthRouter(config: {
         { userId: user._id.toString(), email: user.email, role: user.role },
         jwtAccessSecret
       );
-      const refreshToken = generateRefreshToken({ userId: user._id.toString() }, jwtRefreshSecret);
+      const refreshToken = generateRefreshToken(
+        { userId: user._id.toString(), tokenVersion: user.tokenVersion || 0 },
+        jwtRefreshSecret
+      );
 
       res.cookie('refresh_token', refreshToken, getRefreshCookieOptions(isProduction));
 
@@ -463,13 +625,14 @@ export function createAuthRouter(config: {
         data: {
           user: user.toJSON(),
           accessToken,
+          refreshToken,
           provider: 'github',
         },
       });
     } catch (err: any) {
       res.status(500).json({
         success: false,
-        error: { code: 'OAUTH_ERROR', message: err.message },
+        error: { code: 'OAUTH_ERROR', message: isProduction ? 'OAuth authentication failed' : err.message },
       });
     }
   });

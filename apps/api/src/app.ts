@@ -33,6 +33,9 @@ export function createApp(options: string | AppOptions = 'http://localhost:3000'
 
   const app = express();
 
+  // Reverse proxy support for accurate client IP in rate limiting & audit logs
+  app.set('trust proxy', 1);
+
   // Security Middleware
   app.use(helmet());
   app.use(
