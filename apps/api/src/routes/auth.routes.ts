@@ -242,7 +242,24 @@ export function createAuthRouter(config: {
 
       // Verify token signature, audience, and HS256 algorithm
       const payload = verifyRefreshToken(token, jwtRefreshSecret);
-      const payloadVersion = payload.tokenVersion ?? 0;
+
+      // Strict tokenVersion enforcement: must be a valid non-negative number
+      if (
+        typeof payload.tokenVersion !== 'number' ||
+        isNaN(payload.tokenVersion) ||
+        payload.tokenVersion < 0
+      ) {
+        res.status(401).json({
+          success: false,
+          error: {
+            code: 'INVALID_TOKEN_VERSION',
+            message: 'Refresh token lacks a valid numeric tokenVersion claim or is malformed.',
+          },
+        });
+        return;
+      }
+
+      const payloadVersion = payload.tokenVersion;
 
       // ATOMIC COMPARE-AND-SWAP TOKEN ROTATION:
       // Atomically find user matching current tokenVersion and increment it.
@@ -264,17 +281,15 @@ export function createAuthRouter(config: {
           return;
         }
 
-        // If checkUser.tokenVersion > payloadVersion, token reuse/replay was attempted!
+        // Replay / Stale Token Detection:
+        // If checkUser.tokenVersion > payloadVersion, this token has already been rotated/consumed!
         if ((checkUser.tokenVersion ?? 0) > payloadVersion) {
-          // Invalidate all tokens for this user by incrementing tokenVersion again
-          await User.findByIdAndUpdate(payload.userId, { $inc: { tokenVersion: 1 } });
-
           res.clearCookie('refresh_token', getRefreshCookieOptions(isProduction));
           res.status(401).json({
             success: false,
             error: {
               code: 'TOKEN_REPLAY_DETECTED',
-              message: 'Refresh token reuse detected. All sessions for this account have been invalidated for security.',
+              message: 'Refresh token reuse detected. This token has already been rotated.',
             },
           });
           return;

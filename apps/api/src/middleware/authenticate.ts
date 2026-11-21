@@ -77,12 +77,31 @@ export function authenticate(jwtSecret = process.env.JWT_ACCESS_SECRET || 'dev_j
         return;
       }
 
-      // 5. Immediate Access-Token Revocation Verification (tokenVersion mismatch)
+      // 5. Strict tokenVersion Enforcement & Immediate Revocation Verification
+      // Every valid access token in the current system MUST carry a valid numeric tokenVersion.
+      // Omitted, non-numeric, or negative claims are strictly rejected to prevent revocation bypass.
       if (
-        payload.tokenVersion !== undefined &&
-        user.tokenVersion !== undefined &&
-        payload.tokenVersion !== user.tokenVersion
+        typeof payload.tokenVersion !== 'number' ||
+        isNaN(payload.tokenVersion) ||
+        payload.tokenVersion < 0
       ) {
+        const response: ApiResponse = {
+          success: false,
+          error: {
+            code: 'INVALID_TOKEN_VERSION',
+            message: 'Access token lacks a valid numeric tokenVersion claim or is malformed.',
+          },
+          meta: {
+            timestamp: new Date().toISOString(),
+            version: '1.0.0',
+          },
+        };
+        res.status(401).json(response);
+        return;
+      }
+
+      const currentDbVersion = user.tokenVersion ?? 0;
+      if (payload.tokenVersion !== currentDbVersion) {
         const response: ApiResponse = {
           success: false,
           error: {

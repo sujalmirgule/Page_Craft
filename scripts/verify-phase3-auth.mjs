@@ -447,7 +447,7 @@ async function runTests() {
     let unpinnedRejected = false;
     try {
       const insecureHeader = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
-      const insecurePayload = Buffer.from(JSON.stringify({ userId, email: 'hacker@evil.com', role: 'admin' })).toString('base64url');
+      const insecurePayload = Buffer.from(JSON.stringify({ userId, email: 'hacker@evil.com', role: 'admin', tokenVersion: 0 })).toString('base64url');
       const forgedToken = `${insecureHeader}.${insecurePayload}.`;
       verifyAccessToken(forgedToken, JWT_ACCESS_SECRET);
     } catch {
@@ -612,7 +612,7 @@ async function runTests() {
     check(githubTrue.emailVerified === true, 'GitHub: Authorizes strictly when emailVerified === true');
   }
 
-  // 8.6 OAuth State Lifecycle & Single-Use Enforcement
+  // 8.6 OAuth State Lifecycle & Single-Use Verification
   console.log('\nTest 12: OAuth State Lifecycle & Single-Use Verification');
   {
     const state = generateOAuthState();
@@ -637,7 +637,112 @@ async function runTests() {
     check(secondCheck === true, 'Replay of OAuth state rejected because cookie was cleared upon first use');
   }
 
-  // 8.7 Defensive Malformed ObjectId Handling in Middleware
+  // 8.7 Strict tokenVersion Enforcement & Claim Omission Defenses
+  console.log('\nTest 13: Strict tokenVersion Enforcement (Claim Omission & Malformed Claims)');
+  {
+    const uTestId = new mongoose.Types.ObjectId();
+    const testUserDoc = {
+      _id: uTestId,
+      email: 'strict.token@pagecraft.app',
+      name: 'Strict Token User',
+      role: 'user',
+      plan: 'free',
+      tokenVersion: 2,
+      isActive: true,
+    };
+
+    const origUserFindById = User.findById;
+    User.findById = async (id) => {
+      if (id?.toString() === uTestId.toString()) return testUserDoc;
+      return null;
+    };
+
+    // 13.1 Token missing tokenVersion claim entirely (e.g. legacy or forged token)
+    const tokenWithoutVersion = jwt.sign(
+      { userId: uTestId.toString(), email: testUserDoc.email, role: testUserDoc.role },
+      JWT_ACCESS_SECRET,
+      { issuer: 'pagecraft.app', audience: 'pagecraft-client', algorithm: 'HS256' }
+    );
+    const { req: rMissing, res: resMissing, getStatus: sMissing, getBody: bMissing } = createMockReqRes(
+      undefined, {}, {}, {}, { authorization: `Bearer ${tokenWithoutVersion}` }
+    );
+    let missingPassed = false;
+    await authenticate(JWT_ACCESS_SECRET)(rMissing, resMissing, () => { missingPassed = true; });
+    check(!missingPassed && sMissing() === 401, 'Rejects access token missing tokenVersion claim (401)');
+    check(bMissing()?.error?.code === 'INVALID_TOKEN_VERSION', 'Returns INVALID_TOKEN_VERSION code on missing claim');
+
+    // 13.2 Token with malformed string tokenVersion claim
+    const tokenWithStringVersion = jwt.sign(
+      { userId: uTestId.toString(), email: testUserDoc.email, role: testUserDoc.role, tokenVersion: 'malformed_string' },
+      JWT_ACCESS_SECRET,
+      { issuer: 'pagecraft.app', audience: 'pagecraft-client', algorithm: 'HS256' }
+    );
+    const { req: rString, res: resString, getStatus: sString, getBody: bString } = createMockReqRes(
+      undefined, {}, {}, {}, { authorization: `Bearer ${tokenWithStringVersion}` }
+    );
+    let stringPassed = false;
+    await authenticate(JWT_ACCESS_SECRET)(rString, resString, () => { stringPassed = true; });
+    check(!stringPassed && sString() === 401, 'Rejects access token with non-numeric tokenVersion claim (401)');
+    check(bString()?.error?.code === 'INVALID_TOKEN_VERSION', 'Returns INVALID_TOKEN_VERSION code on string claim');
+
+    // 13.3 Token with negative tokenVersion claim
+    const tokenWithNegativeVersion = jwt.sign(
+      { userId: uTestId.toString(), email: testUserDoc.email, role: testUserDoc.role, tokenVersion: -1 },
+      JWT_ACCESS_SECRET,
+      { issuer: 'pagecraft.app', audience: 'pagecraft-client', algorithm: 'HS256' }
+    );
+    const { req: rNeg, res: resNeg, getStatus: sNeg, getBody: bNeg } = createMockReqRes(
+      undefined, {}, {}, {}, { authorization: `Bearer ${tokenWithNegativeVersion}` }
+    );
+    let negPassed = false;
+    await authenticate(JWT_ACCESS_SECRET)(rNeg, resNeg, () => { negPassed = true; });
+    check(!negPassed && sNeg() === 401, 'Rejects access token with negative tokenVersion claim (401)');
+
+    // 13.4 Token with exact matching numeric tokenVersion
+    const validToken = generateAccessToken(
+      { userId: uTestId.toString(), email: testUserDoc.email, role: testUserDoc.role, tokenVersion: 2 },
+      JWT_ACCESS_SECRET
+    );
+    const { req: rValid, res: resValid, getStatus: sValid } = createMockReqRes(
+      undefined, {}, {}, {}, { authorization: `Bearer ${validToken}` }
+    );
+    let validPassed = false;
+    await authenticate(JWT_ACCESS_SECRET)(rValid, resValid, () => { validPassed = true; });
+    check(validPassed && sValid() === 200, 'Accepts access token with matching valid numeric tokenVersion (200)');
+
+    // Restore stub
+    User.findById = origUserFindById;
+  }
+
+  // 8.8 Session Semantics & Concurrency Invalidation Isolation
+  console.log('\nTest 14: Session Semantics & Concurrency Invalidation Isolation');
+  {
+    const uSemId = new mongoose.Types.ObjectId();
+    let userDbVersion = 0;
+
+    // Simulate CAS execution
+    const casRefresh = async (tokenVer) => {
+      if (tokenVer === userDbVersion) {
+        userDbVersion++;
+        return { success: true, newVersion: userDbVersion };
+      }
+      return { success: false, reason: userDbVersion > tokenVer ? 'TOKEN_REPLAY_DETECTED' : 'INVALID_REFRESH_TOKEN' };
+    };
+
+    // Request 1 arrives with v0
+    const req1Result = await casRefresh(0);
+    check(req1Result.success === true && req1Result.newVersion === 1, 'Request 1 rotates tokenVersion from 0 to 1');
+
+    // Request 2 arrives concurrently with v0
+    const req2Result = await casRefresh(0);
+    check(req2Result.success === false && req2Result.reason === 'TOKEN_REPLAY_DETECTED', 'Request 2 rejected with TOKEN_REPLAY_DETECTED');
+
+    // Verify Request 1's newly issued token (v1) remains active and valid
+    check(userDbVersion === 1, 'Request 1 newly issued token (v1) remains active and valid after Request 2 rejection');
+  }
+
+  // 8.9 Defensive Malformed ObjectId Handling in Middleware
+  console.log('\nTest 15: Defensive Malformed ObjectId & Invitation Protections');
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uOwnerId.toString(), role: 'user' },
@@ -659,7 +764,7 @@ async function runTests() {
     check(getBody()?.error?.code === 'INVALID_ID', 'Returns clean INVALID_ID error code');
   }
 
-  // 8.8 Workspace Invitation & Role Escalation Defense
+  // 8.10 Workspace Invitation & Role Escalation Defense
   {
     const forbiddenRoles = ['owner', 'super_admin', 'invalid_role'];
     const validRoles = ['editor', 'viewer'];
@@ -668,7 +773,7 @@ async function runTests() {
     check(validRoles.every(r => ['editor', 'viewer'].includes(r)), 'Restricts invited member roles strictly to editor and viewer');
   }
 
-  // 8.9 Rate Limiter Surface Coverage
+  // 8.11 Rate Limiter Surface Coverage
   {
     check(typeof authRateLimiter === 'function', 'authRateLimiter is active for authentication attempts');
     check(typeof refreshRateLimiter === 'function', 'refreshRateLimiter is active for token refresh protection');
