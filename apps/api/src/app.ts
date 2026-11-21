@@ -1,0 +1,87 @@
+import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import type { ApiResponse } from '@pagecraft/types';
+
+export function createApp(allowedOrigins = 'http://localhost:3000'): express.Application {
+  const app = express();
+
+  // Security Middleware
+  app.use(helmet());
+  app.use(cors({
+    origin: allowedOrigins.split(',').map(o => o.trim()),
+    credentials: true,
+  }));
+
+  // Body Parsing Middleware
+  app.use(express.json({ limit: '5mb' }));
+  app.use(express.urlencoded({ extended: true }));
+
+  // Health and System Endpoints
+  app.get('/api/v1/health', (req: Request, res: Response) => {
+    const response: ApiResponse<{ status: string; uptime: number; timestamp: string }> = {
+      success: true,
+      data: {
+        status: 'healthy',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+      },
+      meta: {
+        timestamp: new Date().toISOString(),
+        version: '1.0.0',
+      },
+    };
+    res.status(200).json(response);
+  });
+
+  app.get('/api/v1/version', (req: Request, res: Response) => {
+    const response: ApiResponse<{ service: string; version: string; schemaVersion: number }> = {
+      success: true,
+      data: {
+        service: 'PAGECRAFT API',
+        version: '1.0.0',
+        schemaVersion: 1,
+      },
+      meta: {
+        timestamp: new Date().toISOString(),
+        version: '1.0.0',
+      },
+    };
+    res.status(200).json(response);
+  });
+
+  // 404 Handler
+  app.use((req: Request, res: Response) => {
+    const response: ApiResponse = {
+      success: false,
+      error: {
+        code: 'NOT_FOUND',
+        message: `Endpoint ${req.method} ${req.originalUrl} not found`,
+      },
+      meta: {
+        timestamp: new Date().toISOString(),
+        version: '1.0.0',
+      },
+    };
+    res.status(404).json(response);
+  });
+
+  // Global Error Handler
+  app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+    console.error('[API Error]:', err);
+    const response: ApiResponse = {
+      success: false,
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: err.message || 'An unexpected error occurred',
+      },
+      meta: {
+        timestamp: new Date().toISOString(),
+        version: '1.0.0',
+      },
+    };
+    res.status(500).json(response);
+  });
+
+  return app;
+}

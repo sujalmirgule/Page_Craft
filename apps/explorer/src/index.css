@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-[#080c14] text-slate-100 overflow-hidden font-sans;
+  }
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0b1120;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* React Flow customizations */
+.react-flow__background {
+  background-color: #080c14 !important;
+}
+
+.react-flow__controls {
+  border: 1px solid #1e293b !important;
+  background: #0f172a !important;
+  border-radius: 8px !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5) !important;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background: #0f172a !important;
+  border-bottom: 1px solid #1e293b !important;
+  color: #94a3b8 !important;
+  fill: #94a3b8 !important;
+  transition: all 0.15s ease;
+}
+
+.react-flow__controls-button:hover {
+  background: #1e293b !important;
+  color: #38bdf8 !important;
+  fill: #38bdf8 !important;
+}
+
+.react-flow__minimap {
+  background-color: #0b1120 !important;
+  border: 1px solid #1e293b !important;
+  border-radius: 8px !important;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5) !important;
+}
+
+.react-flow__minimap-mask {
+  fill: rgba(15, 23, 42, 0.75) !important;
+}
+
+/* Custom node handle styling */
+.react-flow__handle {
+  width: 9px !important;
+  height: 9px !important;
+  border: 2px solid #080c14 !important;
+  border-radius: 4px !important;
+  background-color: #38bdf8 !important;
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.react-flow__handle:hover {
+  transform: scale(1.4);
+  background-color: #06b6d4 !important;
+}
+
+/* Edge animations and glowing effects */
+@keyframes flowDash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+.react-flow__edge.animated path.react-flow__edge-path {
+  stroke-dasharray: 6 3 !important;
+  animation: flowDash 0.8s linear infinite !important;
+}
+
+.animated-edge-path {
+  stroke-dasharray: 6 3;
+  animation: flowDash 0.8s linear infinite;
+}
+
+.pulse-edge-path {
+  stroke: #38bdf8;
+  filter: drop-shadow(0 0 4px #0284c7);
+}
