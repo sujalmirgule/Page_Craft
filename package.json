@@ -18,7 +18,8 @@
     "test": "npx tsx scripts/verify-monorepo.mjs",
     "test:phase2": "npx tsx scripts/verify-phase2-database.mjs",
     "test:phase3": "npx tsx scripts/verify-phase3-auth.mjs",
-    "test:all": "npx tsx scripts/verify-monorepo.mjs && npx tsx scripts/verify-phase2-database.mjs && npx tsx scripts/verify-phase3-auth.mjs"
+    "test:phase4": "npx tsx scripts/verify-phase4-portfolio.mjs",
+    "test:all": "npx tsx scripts/verify-monorepo.mjs && npx tsx scripts/verify-phase2-database.mjs && npx tsx scripts/verify-phase3-auth.mjs && npx tsx scripts/verify-phase4-portfolio.mjs"
   },
   "devDependencies": {
     "tsx": "^4.23.15",

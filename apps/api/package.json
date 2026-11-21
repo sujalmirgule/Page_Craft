@@ -12,6 +12,7 @@
   "dependencies": {
     "@pagecraft/config": "*",
     "@pagecraft/permissions": "*",
+    "@pagecraft/schema": "*",
     "@pagecraft/types": "*",
     "@pagecraft/validation": "*",
     "bcryptjs": "^3.0.3",

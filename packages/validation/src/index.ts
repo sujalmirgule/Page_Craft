@@ -179,6 +179,107 @@ export const UserLoginValidator = z.object({
   password: z.string().min(1, 'Password is required').max(128, 'Password cannot exceed 128 characters'),
 });
 
+export const RESERVED_SLUGS = [
+  'api',
+  'auth',
+  'admin',
+  'app',
+  'login',
+  'register',
+  'dashboard',
+  'settings',
+  'portfolio',
+  'portfolios',
+  'workspace',
+  'workspaces',
+  'health',
+  'version',
+  'static',
+  'assets',
+  'public',
+  'favicon.ico',
+  'robots.txt',
+  'sitemap.xml',
+] as const;
+
+export function isReservedSlug(slug: string): boolean {
+  const normalized = slug.toLowerCase().trim();
+  return (RESERVED_SLUGS as readonly string[]).includes(normalized);
+}
+
+export const PortfolioCreateValidator = z.object({
+  workspaceId: z.string().min(1, 'Workspace ID is required'),
+  title: z.string().min(1, 'Title is required').max(120),
+  slug: z
+    .string()
+    .min(3, 'Slug must be at least 3 characters')
+    .max(50, 'Slug cannot exceed 50 characters')
+    .regex(/^[a-z0-9-]+$/, 'Slug must only contain lowercase alphanumeric characters and hyphens'),
+  theme: z
+    .object({
+      fontFamily: z.string().optional(),
+      colorPalette: z
+        .object({
+          primary: z.string(),
+          secondary: z.string(),
+          background: z.string(),
+          surface: z.string(),
+          text: z.string(),
+        })
+        .optional(),
+      borderRadius: z.enum(['none', 'sm', 'md', 'lg', 'full']).optional(),
+      darkMode: z.boolean().optional(),
+    })
+    .optional(),
+  seo: z
+    .object({
+      metaTitle: z.string().max(120).optional(),
+      metaDescription: z.string().max(300).optional(),
+      ogImageUrl: z.string().url().optional().or(z.literal('')),
+    })
+    .optional(),
+});
+
+export const PortfolioUpdateValidator = z.object({
+  title: z.string().min(1).max(120).optional(),
+  slug: z
+    .string()
+    .min(3, 'Slug must be at least 3 characters')
+    .max(50, 'Slug cannot exceed 50 characters')
+    .regex(/^[a-z0-9-]+$/, 'Slug must only contain lowercase alphanumeric characters and hyphens')
+    .optional(),
+  seo: z
+    .object({
+      metaTitle: z.string().max(120).optional(),
+      metaDescription: z.string().max(300).optional(),
+      ogImageUrl: z.string().url().optional().or(z.literal('')),
+    })
+    .optional(),
+  settings: z
+    .object({
+      faviconUrl: z.string().url().optional().or(z.literal('')),
+      googleAnalyticsId: z.string().max(40).optional().or(z.literal('')),
+      allowSearchIndexing: z.boolean().optional(),
+    })
+    .optional(),
+  theme: z
+    .object({
+      fontFamily: z.string().optional(),
+      colorPalette: z
+        .object({
+          primary: z.string(),
+          secondary: z.string(),
+          background: z.string(),
+          surface: z.string(),
+          text: z.string(),
+        })
+        .optional(),
+      borderRadius: z.enum(['none', 'sm', 'md', 'lg', 'full']).optional(),
+      darkMode: z.boolean().optional(),
+    })
+    .optional(),
+});
+
 export const SlugReservationValidator = z.object({
   slug: z.string().min(3).max(50).regex(/^[a-z0-9-]+$/, 'Invalid slug format'),
 });

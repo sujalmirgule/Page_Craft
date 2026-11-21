@@ -6,6 +6,7 @@ import type { ApiResponse } from '@pagecraft/types';
 import { getDatabaseConnectionState } from './database';
 import { createAuthRouter } from './routes/auth.routes';
 import { createWorkspaceRouter } from './routes/workspace.routes';
+import { createPortfolioRouter } from './routes/portfolio.routes';
 
 export interface AppOptions {
   allowedOrigins?: string;
@@ -102,6 +103,7 @@ export function createApp(options: string | AppOptions = 'http://localhost:3000'
   );
 
   app.use('/api/v1/workspaces', createWorkspaceRouter(jwtAccessSecret));
+  app.use('/api/v1/portfolios', createPortfolioRouter(jwtAccessSecret));
 
   // 404 Handler
   app.use((req: Request, res: Response) => {
