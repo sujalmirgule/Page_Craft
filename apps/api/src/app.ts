@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import type { ApiResponse } from '@pagecraft/types';
+import { getDatabaseConnectionState } from './database';
 
 export function createApp(allowedOrigins = 'http://localhost:3000'): express.Application {
   const app = express();
@@ -19,10 +20,12 @@ export function createApp(allowedOrigins = 'http://localhost:3000'): express.App
 
   // Health and System Endpoints
   app.get('/api/v1/health', (req: Request, res: Response) => {
-    const response: ApiResponse<{ status: string; uptime: number; timestamp: string }> = {
+    const dbState = getDatabaseConnectionState();
+    const response: ApiResponse<{ status: string; database: string; uptime: number; timestamp: string }> = {
       success: true,
       data: {
         status: 'healthy',
+        database: dbState,
         uptime: process.uptime(),
         timestamp: new Date().toISOString(),
       },

@@ -1,6 +1,6 @@
 import type { WorkspaceRole } from '@pagecraft/types';
 
-export type Role = WorkspaceRole | 'admin';
+export type Role = WorkspaceRole | 'admin' | 'super_admin';
 
 export type Action =
   | 'portfolio:create'
@@ -19,6 +19,21 @@ export type Action =
 
 export const PERMISSION_MATRIX: Record<Role, readonly Action[]> = {
   admin: [
+    'portfolio:create',
+    'portfolio:read',
+    'portfolio:update',
+    'portfolio:delete',
+    'portfolio:publish',
+    'portfolio:duplicate',
+    'workspace:invite',
+    'workspace:remove_member',
+    'workspace:change_role',
+    'billing:manage',
+    'domain:manage',
+    'audit:read',
+    'admin:override'
+  ],
+  super_admin: [
     'portfolio:create',
     'portfolio:read',
     'portfolio:update',

@@ -6,12 +6,24 @@ export type PlanTier = 'free' | 'pro' | 'business';
 
 export type WorkspaceRole = 'owner' | 'editor' | 'viewer';
 
+export type UserRole = 'user' | 'super_admin' | 'admin';
+
+export interface OAuthProviders {
+  googleId?: string;
+  githubId?: string;
+}
+
 export interface User {
   id: string;
   email: string;
   name: string;
   avatarUrl?: string;
   plan: PlanTier;
+  role: UserRole;
+  oauthProviders?: OAuthProviders;
+  razorpayCustomerId?: string;
+  subscriptionExpiresAt?: string;
+  isActive: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -208,6 +220,68 @@ export interface PortfolioDocument {
   theme: ThemeConfig;
   navigation: NavigationConfig;
   pages: PageSchema[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ------------------------------------------
+// Ecosystem & Telemetry Domain Models
+// ------------------------------------------
+
+export type ShowcaseCategory =
+  | 'software-engineer'
+  | 'designer'
+  | 'product-manager'
+  | 'student'
+  | 'other';
+
+export interface ShowcaseTemplate {
+  id: string;
+  title: string;
+  slug: string;
+  description: string;
+  thumbnailUrl?: string;
+  authorId: string;
+  authorName: string;
+  category: ShowcaseCategory;
+  tags: string[];
+  portfolioSnapshot: PortfolioDocument;
+  isFeatured: boolean;
+  cloneCount: number;
+  upvotes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AuditStatus = 'success' | 'failure';
+
+export interface AuditLog {
+  id: string;
+  userId?: string;
+  workspaceId?: string;
+  action: string;
+  targetEntity: string;
+  targetId: string;
+  ipAddress?: string;
+  userAgent?: string;
+  diff?: Record<string, any>;
+  status: AuditStatus;
+  createdAt: string;
+}
+
+export interface AnalyticsRollup {
+  id: string;
+  portfolioId: string;
+  date: string; // YYYY-MM-DD
+  views: number;
+  uniqueVisitors: number;
+  referrers: Array<{ source: string; count: number }>;
+  countries: Array<{ country: string; count: number }>;
+  devices: {
+    desktop: number;
+    mobile: number;
+    tablet: number;
+  };
   createdAt: string;
   updatedAt: string;
 }

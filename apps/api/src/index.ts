@@ -1,5 +1,6 @@
 import { createApp } from './app';
 import { ApiEnvSchema, validateEnv } from '@pagecraft/config';
+import { connectToDatabase, disconnectDatabase } from './database';
 
 // Validate environment variables or use safe defaults in test/dev
 const env = validateEnv(ApiEnvSchema, {
@@ -15,13 +16,21 @@ const env = validateEnv(ApiEnvSchema, {
 
 const app = createApp(env.ALLOWED_ORIGINS);
 
+// Attempt database connection asynchronously
+if (env.NODE_ENV !== 'test') {
+  connectToDatabase(env.MONGODB_URI).catch((err) => {
+    console.warn('\x1b[33m[PAGECRAFT API Warning]\x1b[0m Initial MongoDB connection failed (server running):', err.message);
+  });
+}
+
 const server = app.listen(env.PORT, () => {
   console.log(`\x1b[32m[PAGECRAFT API]\x1b[0m Listening on http://localhost:${env.PORT} in ${env.NODE_ENV} mode`);
 });
 
 // Graceful Shutdown
-function handleShutdown(signal: string) {
+async function handleShutdown(signal: string) {
   console.log(`\nReceived ${signal}. Shutting down API gracefully...`);
+  await disconnectDatabase();
   server.close(() => {
     console.log('[PAGECRAFT API] Server closed successfully');
     process.exit(0);
@@ -30,3 +39,7 @@ function handleShutdown(signal: string) {
 
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 process.on('SIGINT', () => handleShutdown('SIGINT'));
+
+export * from './database';
+export * from './models';
+export { createApp };
