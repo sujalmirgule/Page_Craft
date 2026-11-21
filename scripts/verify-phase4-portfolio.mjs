@@ -4,6 +4,8 @@ import {
   PortfolioUpdateValidator,
   isReservedSlug,
   RESERVED_SLUGS,
+  BlockSchemaValidator,
+  PortfolioDocumentValidator,
 } from '../packages/validation/src/index';
 import { can } from '../packages/permissions/src/index';
 import { createStarterPortfolio } from '../packages/schema/src/index';
@@ -11,7 +13,7 @@ import { Portfolio, Workspace, User } from '../apps/api/src/models/index';
 import { createPortfolioRouter } from '../apps/api/src/routes/portfolio.routes';
 import { createApp } from '../apps/api/src/app';
 
-console.log('=== PAGECRAFT PHASE 4 — MILESTONE 4.1: PORTFOLIO ENGINE VERIFICATION ===\n');
+console.log('=== PAGECRAFT PHASE 4 — MILESTONE 4.1: PORTFOLIO ENGINE AUDIT SUITE ===\n');
 
 let pass = 0;
 let fail = 0;
@@ -52,11 +54,11 @@ function createMockReqRes(user, params = {}, body = {}, query = {}) {
   return { req, res, getStatus: () => statusCode, getBody: () => jsonBody };
 }
 
-async function runTests() {
-  // ----------------------------------------------------
-  // Test 1: Validation & Reserved Slugs
-  // ----------------------------------------------------
-  console.log('Test 1: Reserved Slugs & Zod Validation');
+async function runAudit() {
+  // ====================================================
+  // AUDIT 1: Validation, Reserved Slugs & Constraints
+  // ====================================================
+  console.log('Audit 1: Reserved Slugs & Zod Validation');
   check(isReservedSlug('api') === true, 'Slug "api" is identified as reserved');
   check(isReservedSlug('AUTH') === true, 'Slug "AUTH" (case insensitive) is identified as reserved');
   check(isReservedSlug('admin') === true, 'Slug "admin" is reserved');
@@ -84,10 +86,16 @@ async function runTests() {
   };
   check(!PortfolioCreateValidator.safeParse(shortSlugPayload).success, 'PortfolioCreateValidator rejects slug shorter than 3 characters');
 
-  // ----------------------------------------------------
-  // Test 2: RBAC Permissions for Portfolios
-  // ----------------------------------------------------
-  console.log('\nTest 2: RBAC Matrix Permissions for Portfolios');
+  const longSlugPayload = {
+    ...validCreatePayload,
+    slug: 'a'.repeat(51),
+  };
+  check(!PortfolioCreateValidator.safeParse(longSlugPayload).success, 'PortfolioCreateValidator rejects slug exceeding 50 characters');
+
+  // ====================================================
+  // AUDIT 2: RBAC Matrix Permissions
+  // ====================================================
+  console.log('\nAudit 2: RBAC Matrix Permissions for Portfolios');
   check(can('owner', 'portfolio:create') === true, 'Owner has "portfolio:create" permission');
   check(can('owner', 'portfolio:read') === true, 'Owner has "portfolio:read" permission');
   check(can('owner', 'portfolio:update') === true, 'Owner has "portfolio:update" permission');
@@ -103,32 +111,56 @@ async function runTests() {
   check(can('viewer', 'portfolio:update') === false, 'Viewer CANNOT "portfolio:update"');
   check(can('viewer', 'portfolio:delete') === false, 'Viewer CANNOT "portfolio:delete"');
 
-  // ----------------------------------------------------
-  // Test 3: Starter Portfolio Generation
-  // ----------------------------------------------------
-  console.log('\nTest 3: Starter Portfolio Document Structure');
-  const starter = createStarterPortfolio('user-1', 'ws-1', 'my-portfolio');
+  // ====================================================
+  // AUDIT 3: Starter Portfolio Canonical Integrity
+  // ====================================================
+  console.log('\nAudit 3: Starter Portfolio Canonical Integrity');
+  const starter = createStarterPortfolio('user-1', 'ws-1', 'alex-morgan-site');
   check(starter.schemaVersion === 1, 'Starter portfolio schemaVersion is 1');
-  check(starter.pages.length === 1, 'Starter portfolio has initial Home page');
-  check(starter.pages[0].isHomePage === true, 'Initial page is marked isHomePage: true');
-  check(starter.pages[0].blocks.length === 6, 'Starter home page contains 6 starter blocks');
-  check(starter.theme.fontFamily === 'Inter', 'Starter portfolio has default theme configured');
-  check(starter.navigation.links.length === 1, 'Starter navigation contains home link');
+  check(starter.pages.length === 1, 'Starter portfolio contains exactly 1 initial Home page');
+  check(starter.pages[0].isHomePage === true, 'Initial page is flagged isHomePage: true');
+  check(starter.pages[0].id === 'page-home', 'Initial page has valid ID "page-home"');
+  check(starter.pages[0].blocks.length === 6, 'Starter home page contains exactly 6 starter blocks');
 
-  // ----------------------------------------------------
-  // Test 4: Workspace & Portfolio Mock Setup
-  // ----------------------------------------------------
-  console.log('\nTest 4: Portfolio Route Handlers & Authorization');
+  // Validate each starter block individually against BlockSchemaValidator
+  const starterBlockTypes = starter.pages[0].blocks.map((b) => b.type);
+  check(
+    JSON.stringify(starterBlockTypes) ===
+      JSON.stringify(['header', 'about', 'projects', 'skills', 'experience', 'contact']),
+    'Starter blocks order matches canonical order: header, about, projects, skills, experience, contact'
+  );
+
+  for (const block of starter.pages[0].blocks) {
+    const parseResult = BlockSchemaValidator.safeParse(block);
+    check(parseResult.success, `Block "${block.type}" (id: ${block.id}) passes BlockSchemaValidator`);
+  }
+
+  // Ensure unique block IDs
+  const blockIds = starter.pages[0].blocks.map((b) => b.id);
+  const uniqueBlockIds = new Set(blockIds);
+  check(uniqueBlockIds.size === blockIds.length, 'All starter block IDs are strictly unique');
+
+  // Validate entire starter document against PortfolioDocumentValidator
+  const docResult = PortfolioDocumentValidator.safeParse(starter);
+  check(docResult.success, 'Complete starter portfolio document passes PortfolioDocumentValidator');
+
+  // ====================================================
+  // AUDIT 4: Setup Test Fixtures & Mocks
+  // ====================================================
+  console.log('\nAudit 4: Router Registration & Setup');
   const uOwnerId = new mongoose.Types.ObjectId();
   const uEditorId = new mongoose.Types.ObjectId();
   const uViewerId = new mongoose.Types.ObjectId();
   const uStrangerId = new mongoose.Types.ObjectId();
-  const workspaceId = new mongoose.Types.ObjectId();
 
-  const mockWorkspace = new Workspace({
-    _id: workspaceId,
-    name: 'Engineering Workspace',
-    slug: 'eng-workspace',
+  const workspaceAId = new mongoose.Types.ObjectId();
+  const workspaceBId = new mongoose.Types.ObjectId();
+  const workspaceCId = new mongoose.Types.ObjectId(); // stranger workspace
+
+  const mockWorkspaceA = new Workspace({
+    _id: workspaceAId,
+    name: 'Workspace Alpha',
+    slug: 'ws-alpha',
     ownerId: uOwnerId,
     members: [
       { userId: uOwnerId, role: 'owner', joinedAt: new Date() },
@@ -137,14 +169,36 @@ async function runTests() {
     ],
   });
 
-  const portfolioId = new mongoose.Types.ObjectId();
-  const mockPortfolio = new Portfolio({
-    _id: portfolioId,
+  const mockWorkspaceB = new Workspace({
+    _id: workspaceBId,
+    name: 'Workspace Beta',
+    slug: 'ws-beta',
+    ownerId: uOwnerId,
+    members: [
+      { userId: uOwnerId, role: 'owner', joinedAt: new Date() },
+      { userId: uEditorId, role: 'editor', joinedAt: new Date() },
+    ],
+  });
+
+  const mockWorkspaceC = new Workspace({
+    _id: workspaceCId,
+    name: 'Workspace Gamma',
+    slug: 'ws-gamma',
+    ownerId: uStrangerId,
+    members: [{ userId: uStrangerId, role: 'owner', joinedAt: new Date() }],
+  });
+
+  const portfolioAId = new mongoose.Types.ObjectId();
+  const portfolioBId = new mongoose.Types.ObjectId();
+  const portfolioCId = new mongoose.Types.ObjectId();
+
+  const mockPortfolioA = new Portfolio({
+    _id: portfolioAId,
     schemaVersion: 1,
     ownerId: uOwnerId,
-    workspaceId: workspaceId,
-    slug: 'eng-portfolio',
-    title: 'Engineering Portfolio',
+    workspaceId: workspaceAId,
+    slug: 'portfolio-alpha',
+    title: 'Alpha Portfolio',
     isPublished: false,
     pages: starter.pages,
     theme: starter.theme,
@@ -153,7 +207,37 @@ async function runTests() {
     navigation: starter.navigation,
   });
 
-  // Stubs for Workspace and Portfolio
+  const mockPortfolioB = new Portfolio({
+    _id: portfolioBId,
+    schemaVersion: 1,
+    ownerId: uOwnerId,
+    workspaceId: workspaceBId,
+    slug: 'portfolio-beta',
+    title: 'Beta Portfolio',
+    isPublished: false,
+    pages: starter.pages,
+    theme: starter.theme,
+    seo: starter.seo,
+    settings: starter.settings,
+    navigation: starter.navigation,
+  });
+
+  const mockPortfolioC = new Portfolio({
+    _id: portfolioCId,
+    schemaVersion: 1,
+    ownerId: uStrangerId,
+    workspaceId: workspaceCId,
+    slug: 'portfolio-gamma',
+    title: 'Gamma Stranger Portfolio',
+    isPublished: false,
+    pages: starter.pages,
+    theme: starter.theme,
+    seo: starter.seo,
+    settings: starter.settings,
+    navigation: starter.navigation,
+  });
+
+  // Stubs
   const origWsFindById = Workspace.findById;
   const origPortFindById = Portfolio.findById;
   const origPortFindBySlug = Portfolio.findBySlug;
@@ -164,70 +248,82 @@ async function runTests() {
   const origPortFindByIdAndDelete = Portfolio.findByIdAndDelete;
 
   Workspace.findById = async (id) => {
-    if (id?.toString() === workspaceId.toString()) return mockWorkspace;
+    const sId = id?.toString();
+    if (sId === workspaceAId.toString()) return mockWorkspaceA;
+    if (sId === workspaceBId.toString()) return mockWorkspaceB;
+    if (sId === workspaceCId.toString()) return mockWorkspaceC;
     return null;
   };
 
   Portfolio.findById = async (id) => {
-    if (id?.toString() === portfolioId.toString()) return mockPortfolio;
+    const sId = id?.toString();
+    if (sId === portfolioAId.toString()) return mockPortfolioA;
+    if (sId === portfolioBId.toString()) return mockPortfolioB;
+    if (sId === portfolioCId.toString()) return mockPortfolioC;
     return null;
   };
 
   Portfolio.findBySlug = async (slug) => {
-    if (slug === 'eng-portfolio') return mockPortfolio;
+    if (slug === 'portfolio-alpha') return mockPortfolioA;
+    if (slug === 'portfolio-beta') return mockPortfolioB;
+    if (slug === 'portfolio-gamma') return mockPortfolioC;
     return null;
   };
 
   Portfolio.findOne = async (query) => {
-    if (query?.slug === 'eng-portfolio') return mockPortfolio;
+    if (query?.slug === 'portfolio-alpha') return mockPortfolioA;
+    if (query?.slug === 'portfolio-beta') return mockPortfolioB;
+    if (query?.slug === 'portfolio-gamma') return mockPortfolioC;
     return null;
   };
 
   Portfolio.findByWorkspace = async (wsId) => {
-    if (wsId?.toString() === workspaceId.toString()) return [mockPortfolio];
+    const sId = wsId?.toString();
+    if (sId === workspaceAId.toString()) return [mockPortfolioA];
+    if (sId === workspaceBId.toString()) return [mockPortfolioB];
+    if (sId === workspaceCId.toString()) return [mockPortfolioC];
     return [];
   };
 
   Workspace.findByUser = async (uId) => {
-    if ([uOwnerId.toString(), uEditorId.toString(), uViewerId.toString()].includes(uId.toString())) {
-      return [mockWorkspace];
+    const sId = uId?.toString();
+    if (sId === uOwnerId.toString() || sId === uEditorId.toString()) {
+      return [mockWorkspaceA, mockWorkspaceB];
+    }
+    if (sId === uViewerId.toString()) {
+      return [mockWorkspaceA];
+    }
+    if (sId === uStrangerId.toString()) {
+      return [mockWorkspaceC];
     }
     return [];
   };
 
   Portfolio.find = (query) => {
-    const pList = [mockPortfolio];
+    let result = [mockPortfolioA, mockPortfolioB, mockPortfolioC];
+    if (query?.workspaceId?.$in) {
+      const allowed = query.workspaceId.$in.map((id) => id.toString());
+      result = result.filter((p) => allowed.includes(p.workspaceId.toString()));
+    }
     return {
-      sort: () => Promise.resolve(pList),
+      sort: () => Promise.resolve(result),
     };
   };
 
   let deletedId = null;
   Portfolio.findByIdAndDelete = async (id) => {
     deletedId = id?.toString();
-    return mockPortfolio;
+    return mockPortfolioA;
   };
 
   const router = createPortfolioRouter(JWT_ACCESS_SECRET);
   check(typeof router === 'function', 'createPortfolioRouter creates Express router instance');
 
-  // Extract handlers from router stack
-  // Stack layers: 0: auth, 1: POST /, 2: GET /, 3: GET /:id, 4: PATCH /:id, 5: DELETE /:id
-  const postHandler = router.stack.find(
-    (l) => l.route && l.route.path === '/' && l.route.methods.post
-  );
-  const getListHandler = router.stack.find(
-    (l) => l.route && l.route.path === '/' && l.route.methods.get
-  );
-  const getSingleHandler = router.stack.find(
-    (l) => l.route && l.route.path === '/:id' && l.route.methods.get
-  );
-  const patchHandler = router.stack.find(
-    (l) => l.route && l.route.path === '/:id' && l.route.methods.patch
-  );
-  const deleteHandler = router.stack.find(
-    (l) => l.route && l.route.path === '/:id' && l.route.methods.delete
-  );
+  const postHandler = router.stack.find((l) => l.route && l.route.path === '/' && l.route.methods.post);
+  const getListHandler = router.stack.find((l) => l.route && l.route.path === '/' && l.route.methods.get);
+  const getSingleHandler = router.stack.find((l) => l.route && l.route.path === '/:id' && l.route.methods.get);
+  const patchHandler = router.stack.find((l) => l.route && l.route.path === '/:id' && l.route.methods.patch);
+  const deleteHandler = router.stack.find((l) => l.route && l.route.path === '/:id' && l.route.methods.delete);
 
   check(!!postHandler, 'POST / route is registered');
   check(!!getListHandler, 'GET / route is registered');
@@ -235,31 +331,44 @@ async function runTests() {
   check(!!patchHandler, 'PATCH /:id route is registered');
   check(!!deleteHandler, 'DELETE /:id route is registered');
 
-  // ----------------------------------------------------
-  // Test 5: POST /api/v1/portfolios (Creation tests)
-  // ----------------------------------------------------
-  console.log('\nTest 5: POST /api/v1/portfolios Creation & Access Control');
+  // ====================================================
+  // AUDIT 5: Portfolio Creation, Authorization & Concurrency
+  // ====================================================
+  console.log('\nAudit 5: Portfolio Creation, Authorization & Concurrency');
 
-  // 5.1 Invalid Workspace ID format
+  // 5.1 Malformed Workspace ID
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uOwnerId.toString(), role: 'user' },
       {},
-      { workspaceId: 'invalid-ws-id', title: 'Test', slug: 'my-test-port' }
+      { workspaceId: 'not-a-valid-id', title: 'Test', slug: 'my-test-port' }
     );
-    // Execute inner route handler (last in stack.route.stack)
     const handler = postHandler.route.stack[postHandler.route.stack.length - 1].handle;
     await handler(req, res);
-    check(getStatus() === 400, 'Rejects invalid workspace ObjectId with 400');
+    check(getStatus() === 400, 'Rejects malformed workspaceId with 400');
     check(getBody()?.error?.code === 'INVALID_ID', 'Returns INVALID_ID code');
   }
 
-  // 5.2 Reserved Slug Rejection
+  // 5.2 Non-Existent Workspace
+  {
+    const nonExistentWsId = new mongoose.Types.ObjectId();
+    const { req, res, getStatus, getBody } = createMockReqRes(
+      { id: uOwnerId.toString(), role: 'user' },
+      {},
+      { workspaceId: nonExistentWsId.toString(), title: 'Test', slug: 'my-test-port' }
+    );
+    const handler = postHandler.route.stack[postHandler.route.stack.length - 1].handle;
+    await handler(req, res);
+    check(getStatus() === 404, 'Rejects non-existent workspace with 404');
+    check(getBody()?.error?.code === 'WORKSPACE_NOT_FOUND', 'Returns WORKSPACE_NOT_FOUND code');
+  }
+
+  // 5.3 Reserved Slug Rejection
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uOwnerId.toString(), role: 'user' },
       {},
-      { workspaceId: workspaceId.toString(), title: 'Admin Site', slug: 'admin' }
+      { workspaceId: workspaceAId.toString(), title: 'Admin Site', slug: 'admin' }
     );
     const handler = postHandler.route.stack[postHandler.route.stack.length - 1].handle;
     await handler(req, res);
@@ -267,12 +376,12 @@ async function runTests() {
     check(getBody()?.error?.code === 'RESERVED_SLUG', 'Returns RESERVED_SLUG code');
   }
 
-  // 5.3 Duplicate Slug Rejection
+  // 5.4 Duplicate Slug Rejection (Application Check)
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uOwnerId.toString(), role: 'user' },
       {},
-      { workspaceId: workspaceId.toString(), title: 'Engineering Site', slug: 'eng-portfolio' }
+      { workspaceId: workspaceAId.toString(), title: 'Alpha Site', slug: 'portfolio-alpha' }
     );
     const handler = postHandler.route.stack[postHandler.route.stack.length - 1].handle;
     await handler(req, res);
@@ -280,12 +389,35 @@ async function runTests() {
     check(getBody()?.error?.code === 'SLUG_IN_USE', 'Returns SLUG_IN_USE code');
   }
 
-  // 5.4 Cross-Tenant Creation Rejection (Stranger)
+  // 5.5 Concurrency / Driver Duplicate Key Error Handling (E11000)
+  {
+    const origSave = Portfolio.prototype.save;
+    Portfolio.prototype.save = async function () {
+      const err = new Error('E11000 duplicate key error collection: pagecraft.portfolios index: slug_1 dup key: { slug: "concurrent-slug" }');
+      (err).code = 11000;
+      (err).name = 'MongoServerError';
+      throw err;
+    };
+
+    const { req, res, getStatus, getBody } = createMockReqRes(
+      { id: uOwnerId.toString(), role: 'user' },
+      {},
+      { workspaceId: workspaceAId.toString(), title: 'Concurrent Race', slug: 'concurrent-slug' }
+    );
+    const handler = postHandler.route.stack[postHandler.route.stack.length - 1].handle;
+    await handler(req, res);
+    check(getStatus() === 409, 'Intercepts driver E11000 duplicate key error and returns 409 (not 500)');
+    check(getBody()?.error?.code === 'SLUG_IN_USE', 'Returns SLUG_IN_USE code on driver duplicate key error');
+
+    Portfolio.prototype.save = origSave;
+  }
+
+  // 5.6 Non-Member Stranger Rejection
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uStrangerId.toString(), role: 'user' },
       {},
-      { workspaceId: workspaceId.toString(), title: 'Stranger Port', slug: 'stranger-port' }
+      { workspaceId: workspaceAId.toString(), title: 'Stranger Port', slug: 'stranger-port' }
     );
     const handler = postHandler.route.stack[postHandler.route.stack.length - 1].handle;
     await handler(req, res);
@@ -293,12 +425,12 @@ async function runTests() {
     check(getBody()?.error?.code === 'FORBIDDEN', 'Returns FORBIDDEN code for stranger');
   }
 
-  // 5.5 Viewer Role Creation Rejection
+  // 5.7 Viewer Role Rejection
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uViewerId.toString(), role: 'user' },
       {},
-      { workspaceId: workspaceId.toString(), title: 'Viewer Port', slug: 'viewer-port' }
+      { workspaceId: workspaceAId.toString(), title: 'Viewer Port', slug: 'viewer-port' }
     );
     const handler = postHandler.route.stack[postHandler.route.stack.length - 1].handle;
     await handler(req, res);
@@ -306,7 +438,7 @@ async function runTests() {
     check(getBody()?.error?.code === 'INSUFFICIENT_PERMISSIONS', 'Returns INSUFFICIENT_PERMISSIONS code for viewer');
   }
 
-  // 5.6 Owner/Editor Successful Creation
+  // 5.8 Editor Role Creation Allowed
   {
     let savedDoc = null;
     const origSave = Portfolio.prototype.save;
@@ -316,25 +448,24 @@ async function runTests() {
     };
 
     const { req, res, getStatus, getBody } = createMockReqRes(
-      { id: uOwnerId.toString(), role: 'user' },
+      { id: uEditorId.toString(), role: 'user' },
       {},
-      { workspaceId: workspaceId.toString(), title: 'New Alex Morgan Portfolio', slug: 'alex-brand-new' }
+      { workspaceId: workspaceAId.toString(), title: 'Editor Created Portfolio', slug: 'editor-site' }
     );
     const handler = postHandler.route.stack[postHandler.route.stack.length - 1].handle;
     await handler(req, res);
-    check(getStatus() === 201, 'Owner successfully creates portfolio (201)');
+    check(getStatus() === 201, 'Editor role is authorized to create portfolio (201)');
     check(getBody()?.success === true, 'Returns success: true');
-    check(savedDoc?.slug === 'alex-brand-new', 'Persists normalized slug');
-    check(savedDoc?.pages?.length === 1, 'Initializes with 1 starter home page');
-    check(savedDoc?.pages[0]?.blocks?.length === 6, 'Initializes with 6 default blocks');
+    check(savedDoc?.workspaceId?.toString() === workspaceAId.toString(), 'Workspace ID is securely bound and persisted');
+    check(savedDoc?.ownerId?.toString() === uEditorId.toString(), 'Owner ID is bound to authenticated user');
 
     Portfolio.prototype.save = origSave;
   }
 
-  // ----------------------------------------------------
-  // Test 6: GET /api/v1/portfolios (Listing tests)
-  // ----------------------------------------------------
-  console.log('\nTest 6: GET /api/v1/portfolios Listing & Workspace Filtering');
+  // ====================================================
+  // AUDIT 6: Portfolio Listing & Tenant Isolation
+  // ====================================================
+  console.log('\nAudit 6: Portfolio Listing & Tenant Isolation');
 
   // 6.1 List by WorkspaceId for authorized member
   {
@@ -342,13 +473,13 @@ async function runTests() {
       { id: uEditorId.toString(), role: 'user' },
       {},
       {},
-      { workspaceId: workspaceId.toString() }
+      { workspaceId: workspaceAId.toString() }
     );
     const handler = getListHandler.route.stack[0].handle;
     await handler(req, res);
-    check(getStatus() === 200, 'Member can list portfolios by workspaceId (200)');
-    check(Array.isArray(getBody()?.data), 'Returns array of portfolios');
-    check(getBody()?.data?.length === 1, 'Returns 1 portfolio in test workspace');
+    check(getStatus() === 200, 'Member can list portfolios in authorized workspace (200)');
+    check(getBody()?.data?.length === 1, 'Returns 1 portfolio in Workspace Alpha');
+    check(getBody()?.data[0]?.slug === 'portfolio-alpha', 'Returns correct portfolio for Workspace Alpha');
   }
 
   // 6.2 List by WorkspaceId for stranger
@@ -357,40 +488,44 @@ async function runTests() {
       { id: uStrangerId.toString(), role: 'user' },
       {},
       {},
-      { workspaceId: workspaceId.toString() }
+      { workspaceId: workspaceAId.toString() }
     );
     const handler = getListHandler.route.stack[0].handle;
     await handler(req, res);
-    check(getStatus() === 403, 'Stranger is forbidden from querying workspace portfolios (403)');
+    check(getStatus() === 403, 'Stranger is forbidden from querying Workspace Alpha portfolios (403)');
     check(getBody()?.error?.code === 'FORBIDDEN', 'Returns FORBIDDEN code');
   }
 
-  // 6.3 List across all user workspaces (no query param)
+  // 6.3 Multi-workspace user listing (without workspaceId)
   {
+    // uEditor belongs to Workspace Alpha and Workspace Beta, but NOT Workspace Gamma
     const { req, res, getStatus, getBody } = createMockReqRes(
-      { id: uViewerId.toString(), role: 'user' },
+      { id: uEditorId.toString(), role: 'user' },
       {},
       {},
       {}
     );
     const handler = getListHandler.route.stack[0].handle;
     await handler(req, res);
-    check(getStatus() === 200, 'User can list portfolios across all their accessible workspaces');
-    check(Array.isArray(getBody()?.data), 'Returns portfolios array');
+    check(getStatus() === 200, 'User lists portfolios across their accessible workspaces');
+    check(getBody()?.data?.length === 2, 'Returns exactly 2 portfolios across user workspaces (Alpha and Beta)');
+    const returnedSlugs = getBody()?.data?.map((p) => p.slug);
+    check(returnedSlugs.includes('portfolio-alpha'), 'Includes Alpha portfolio');
+    check(returnedSlugs.includes('portfolio-beta'), 'Includes Beta portfolio');
+    check(!returnedSlugs.includes('portfolio-gamma'), 'Strictly excludes stranger Gamma portfolio');
   }
 
-  // ----------------------------------------------------
-  // Test 7: GET /api/v1/portfolios/:id (Read Single)
-  // ----------------------------------------------------
-  console.log('\nTest 7: GET /api/v1/portfolios/:id Access Control');
+  // ====================================================
+  // AUDIT 7: Single Portfolio Retrieval & Isolation
+  // ====================================================
+  console.log('\nAudit 7: Single Portfolio Retrieval & Isolation');
 
-  // 7.1 Read single portfolio as Owner/Editor/Viewer (Guarded by requirePortfolioAccess)
+  // 7.1 Viewer can read portfolio
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uViewerId.toString(), role: 'user' },
-      { id: portfolioId.toString() }
+      { id: portfolioAId.toString() }
     );
-    // Execute middleware chain on route: stack[0] is requirePortfolioAccess, stack[1] is handler
     const guard = getSingleHandler.route.stack[0].handle;
     const handler = getSingleHandler.route.stack[1].handle;
     let nextCalled = false;
@@ -398,116 +533,147 @@ async function runTests() {
     check(nextCalled && getStatus() === 200, 'Viewer passes requirePortfolioAccess("portfolio:read")');
     if (nextCalled) {
       handler(req, res);
-      check(getStatus() === 200, 'Viewer successfully receives portfolio data');
-      check(getBody()?.data?.title === 'Engineering Portfolio', 'Matches portfolio title');
+      check(getStatus() === 200, 'Viewer successfully retrieves portfolio document');
+      check(getBody()?.data?.title === 'Alpha Portfolio', 'Matches portfolio title');
     }
   }
 
-  // 7.2 Read single portfolio as Stranger
+  // 7.2 Stranger from another workspace cannot read portfolio
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uStrangerId.toString(), role: 'user' },
-      { id: portfolioId.toString() }
+      { id: portfolioAId.toString() }
     );
     const guard = getSingleHandler.route.stack[0].handle;
     let nextCalled = false;
     await guard(req, res, () => { nextCalled = true; });
-    check(!nextCalled && getStatus() === 403, 'Stranger cannot read single portfolio (403)');
+    check(!nextCalled && getStatus() === 403, 'Stranger is blocked from reading portfolio (403)');
     check(getBody()?.error?.code === 'FORBIDDEN', 'Returns FORBIDDEN code for stranger');
   }
 
-  // ----------------------------------------------------
-  // Test 8: PATCH /api/v1/portfolios/:id (Update)
-  // ----------------------------------------------------
-  console.log('\nTest 8: PATCH /api/v1/portfolios/:id Metadata Mutation & Safety');
+  // ====================================================
+  // AUDIT 8: Metadata Mutation & Mass Assignment Prevention
+  // ====================================================
+  console.log('\nAudit 8: Metadata Mutation & Mass Assignment Prevention');
 
-  // 8.1 Viewer cannot update portfolio
+  // 8.1 Viewer cannot update
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uViewerId.toString(), role: 'user' },
-      { id: portfolioId.toString() },
-      { title: 'New Viewer Title' }
+      { id: portfolioAId.toString() },
+      { title: 'Viewer Attempt' }
     );
     const guard = patchHandler.route.stack[0].handle;
     let nextCalled = false;
     await guard(req, res, () => { nextCalled = true; });
-    check(!nextCalled && getStatus() === 403, 'Viewer cannot update portfolio (403)');
-    check(getBody()?.error?.code === 'INSUFFICIENT_PERMISSIONS', 'Returns INSUFFICIENT_PERMISSIONS for viewer update');
+    check(!nextCalled && getStatus() === 403, 'Viewer role cannot execute PATCH (403)');
+    check(getBody()?.error?.code === 'INSUFFICIENT_PERMISSIONS', 'Returns INSUFFICIENT_PERMISSIONS');
   }
 
-  // 8.2 Editor can update portfolio metadata
+  // 8.2 Mass Assignment Prevention: Attempt to overwrite pages, blocks, workspaceId, ownerId
   {
     const testDoc = new Portfolio({
-      _id: portfolioId,
+      _id: portfolioAId,
       schemaVersion: 1,
       ownerId: uOwnerId,
-      workspaceId: workspaceId,
-      slug: 'eng-portfolio',
-      title: 'Original Title',
+      workspaceId: workspaceAId,
+      slug: 'portfolio-alpha',
+      title: 'Original Alpha',
       pages: starter.pages,
       theme: starter.theme,
       seo: starter.seo,
       settings: starter.settings,
       navigation: starter.navigation,
     });
-    let saveRan = false;
     testDoc.save = async function () {
-      saveRan = true;
       return this;
+    };
+
+    // Attacker sends malicious payload attempting mass assignment
+    const maliciousPayload = {
+      title: 'Legitimate Title Update',
+      pages: [], // attempt to wipe pages
+      blocks: [], // attempt to wipe blocks
+      workspaceId: new mongoose.Types.ObjectId().toString(), // attempt to hijack workspace
+      ownerId: new mongoose.Types.ObjectId().toString(), // attempt to hijack owner
+      navigation: null, // attempt to wipe navigation
+      schemaVersion: 99, // attempt to corrupt schemaVersion
+    };
+
+    // Pass through Zod validator middleware
+    const validatorMiddleware = patchHandler.route.stack[1].handle;
+    const { req, res, getStatus } = createMockReqRes(
+      { id: uEditorId.toString(), role: 'user' },
+      { id: portfolioAId.toString() },
+      maliciousPayload
+    );
+    req.portfolio = testDoc;
+
+    let validatorNext = false;
+    validatorMiddleware(req, res, () => {
+      validatorNext = true;
+    });
+
+    check(validatorNext, 'Validator middleware successfully parses and filters payload');
+    check(req.body.pages === undefined, 'Mass assignment stripped: req.body.pages is undefined');
+    check(req.body.blocks === undefined, 'Mass assignment stripped: req.body.blocks is undefined');
+    check(req.body.workspaceId === undefined, 'Mass assignment stripped: req.body.workspaceId is undefined');
+    check(req.body.ownerId === undefined, 'Mass assignment stripped: req.body.ownerId is undefined');
+
+    // Run patch handler
+    const handler = patchHandler.route.stack[patchHandler.route.stack.length - 1].handle;
+    await handler(req, res);
+    check(getStatus() === 200, 'Patch completes successfully (200)');
+    check(testDoc.title === 'Legitimate Title Update', 'Title updated');
+    check(testDoc.pages.length === 1, 'Pages remain completely intact');
+    check(testDoc.pages[0].blocks.length === 6, 'Blocks remain completely intact');
+    check(testDoc.workspaceId.toString() === workspaceAId.toString(), 'Workspace ID remains unchanged');
+    check(testDoc.ownerId.toString() === uOwnerId.toString(), 'Owner ID remains unchanged');
+  }
+
+  // 8.3 Concurrency / Driver Duplicate Key Error Handling in PATCH (E11000)
+  {
+    const testDoc = new Portfolio({
+      _id: portfolioAId,
+      slug: 'portfolio-alpha',
+      title: 'Original',
+    });
+    testDoc.save = async function () {
+      const err = new Error('E11000 duplicate key error');
+      (err).code = 11000;
+      (err).name = 'MongoServerError';
+      throw err;
     };
 
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uEditorId.toString(), role: 'user' },
-      { id: portfolioId.toString() },
-      {
-        title: 'Updated Engineering Portfolio',
-        seo: { metaTitle: 'New SEO Title' },
-        theme: { darkMode: false },
-      }
+      { id: portfolioAId.toString() },
+      { slug: 'portfolio-beta' }
     );
     req.portfolio = testDoc;
 
     const handler = patchHandler.route.stack[patchHandler.route.stack.length - 1].handle;
     await handler(req, res);
-    check(getStatus() === 200, 'Editor successfully updates portfolio metadata (200)');
-    check(saveRan === true, 'Document save() was called');
-    check(testDoc.title === 'Updated Engineering Portfolio', 'Title updated');
-    check(testDoc.seo.metaTitle === 'New SEO Title', 'SEO updated');
-    check(testDoc.theme.darkMode === false, 'Theme updated');
-    check(testDoc.pages.length === 1, 'Preserves pages intact (no loss of subdocuments)');
-    check(testDoc.pages[0].blocks.length === 6, 'Preserves all nested blocks intact');
+    check(getStatus() === 409, 'Patch intercepts driver E11000 duplicate key error and returns 409');
+    check(getBody()?.error?.code === 'SLUG_IN_USE', 'Returns SLUG_IN_USE code on driver duplicate key error');
   }
 
-  // 8.3 Update rejects reserved slug
-  {
-    const testDoc = new Portfolio({
-      _id: portfolioId,
-      slug: 'eng-portfolio',
-      title: 'Original',
-    });
-    const { req, res, getStatus, getBody } = createMockReqRes(
-      { id: uEditorId.toString(), role: 'user' },
-      { id: portfolioId.toString() },
-      { slug: 'dashboard' }
-    );
-    req.portfolio = testDoc;
+  // ====================================================
+  // AUDIT 9: Portfolio Deletion Lifecycle & Absence of Trash
+  // ====================================================
+  console.log('\nAudit 9: Portfolio Deletion Lifecycle & Schema Verification');
 
-    const handler = patchHandler.route.stack[patchHandler.route.stack.length - 1].handle;
-    await handler(req, res);
-    check(getStatus() === 400, 'Patch rejects updating slug to reserved "dashboard" (400)');
-    check(getBody()?.error?.code === 'RESERVED_SLUG', 'Returns RESERVED_SLUG code');
-  }
+  // 9.1 Verify absence of soft deletion / trash properties in Schema (Preserving approved architecture)
+  const portfolioSchemaPaths = Object.keys(Portfolio.schema.paths);
+  check(!portfolioSchemaPaths.includes('isDeleted'), 'Portfolio schema does NOT contain unauthorized "isDeleted" flag');
+  check(!portfolioSchemaPaths.includes('deletedAt'), 'Portfolio schema does NOT contain unauthorized "deletedAt" flag');
+  check(!portfolioSchemaPaths.includes('trash'), 'Portfolio schema does NOT contain unauthorized "trash" flag');
 
-  // ----------------------------------------------------
-  // Test 9: DELETE /api/v1/portfolios/:id (Delete & Access Control)
-  // ----------------------------------------------------
-  console.log('\nTest 9: DELETE /api/v1/portfolios/:id Access Control');
-
-  // 9.1 Editor CANNOT delete portfolio (Restricted to Owner)
+  // 9.2 Editor CANNOT delete portfolio
   {
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uEditorId.toString(), role: 'user' },
-      { id: portfolioId.toString() }
+      { id: portfolioAId.toString() }
     );
     const guard = deleteHandler.route.stack[0].handle;
     let nextCalled = false;
@@ -516,11 +682,11 @@ async function runTests() {
     check(getBody()?.error?.code === 'INSUFFICIENT_PERMISSIONS', 'Returns INSUFFICIENT_PERMISSIONS for editor delete');
   }
 
-  // 9.2 Viewer CANNOT delete portfolio
+  // 9.3 Viewer CANNOT delete portfolio
   {
     const { req, res, getStatus } = createMockReqRes(
       { id: uViewerId.toString(), role: 'user' },
-      { id: portfolioId.toString() }
+      { id: portfolioAId.toString() }
     );
     const guard = deleteHandler.route.stack[0].handle;
     let nextCalled = false;
@@ -528,12 +694,12 @@ async function runTests() {
     check(!nextCalled && getStatus() === 403, 'Viewer cannot delete portfolio (403)');
   }
 
-  // 9.3 Workspace Owner can delete portfolio
+  // 9.4 Workspace Owner can delete portfolio (Permanent deletion via findByIdAndDelete)
   {
     deletedId = null;
     const { req, res, getStatus, getBody } = createMockReqRes(
       { id: uOwnerId.toString(), role: 'user' },
-      { id: portfolioId.toString() }
+      { id: portfolioAId.toString() }
     );
     const guard = deleteHandler.route.stack[0].handle;
     const handler = deleteHandler.route.stack[1].handle;
@@ -545,15 +711,15 @@ async function runTests() {
     if (nextCalled) {
       await handler(req, res);
       check(getStatus() === 200, 'Delete executes successfully (200)');
-      check(deletedId === portfolioId.toString(), 'Calls findByIdAndDelete with target portfolio ID');
-      check(getBody()?.data?.id === portfolioId.toString(), 'Returns deleted portfolio ID in payload');
+      check(deletedId === portfolioAId.toString(), 'Calls findByIdAndDelete with target portfolio ID');
+      check(getBody()?.data?.id === portfolioAId.toString(), 'Returns deleted portfolio ID in payload');
     }
   }
 
-  // ----------------------------------------------------
-  // Test 10: Express App Router Integration
-  // ----------------------------------------------------
-  console.log('\nTest 10: Express Application Mounting & Route Table');
+  // ====================================================
+  // AUDIT 10: Express App Integration
+  // ====================================================
+  console.log('\nAudit 10: Express Application Mounting & Route Table');
   const app = createApp({
     jwtAccessSecret: JWT_ACCESS_SECRET,
     jwtRefreshSecret: 'refresh_secret_32_characters_minimum',
@@ -574,9 +740,9 @@ async function runTests() {
   Workspace.findByUser = origWsFindByUser;
   Portfolio.findByIdAndDelete = origPortFindByIdAndDelete;
 
-  // ----------------------------------------------------
+  // ====================================================
   // Summary
-  // ----------------------------------------------------
+  // ====================================================
   console.log(`\n====================================================`);
   console.log(`Total checks: ${pass + fail} | Passed: ${pass} | Failed: ${fail}`);
   console.log(`====================================================\n`);
@@ -586,7 +752,7 @@ async function runTests() {
   }
 }
 
-runTests().catch((err) => {
-  console.error('Fatal test error:', err);
+runAudit().catch((err) => {
+  console.error('Fatal audit error:', err);
   process.exit(1);
 });

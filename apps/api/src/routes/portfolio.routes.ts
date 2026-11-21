@@ -136,6 +136,18 @@ export function createPortfolioRouter(jwtAccessSecret: string): Router {
           },
         });
       } catch (err: any) {
+        if (err.code === 11000 || (err.name === 'MongoServerError' && err.code === 11000)) {
+          const conflictSlug = req.body?.slug ? String(req.body.slug).toLowerCase().trim() : 'slug';
+          res.status(409).json({
+            success: false,
+            error: {
+              code: 'SLUG_IN_USE',
+              message: `Slug '${conflictSlug}' is already in use by another portfolio`,
+            },
+          });
+          return;
+        }
+
         res.status(500).json({
           success: false,
           error: {
@@ -335,6 +347,17 @@ export function createPortfolioRouter(jwtAccessSecret: string): Router {
           },
         });
       } catch (err: any) {
+        if (err.code === 11000 || (err.name === 'MongoServerError' && err.code === 11000)) {
+          res.status(409).json({
+            success: false,
+            error: {
+              code: 'SLUG_IN_USE',
+              message: 'Portfolio slug is already in use by another portfolio',
+            },
+          });
+          return;
+        }
+
         res.status(500).json({
           success: false,
           error: {
