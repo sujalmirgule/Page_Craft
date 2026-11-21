@@ -14,7 +14,13 @@ const env = validateEnv(ApiEnvSchema, {
   ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:5173',
 });
 
-const app = createApp(env.ALLOWED_ORIGINS);
+const app = createApp({
+  allowedOrigins: env.ALLOWED_ORIGINS,
+  jwtAccessSecret: env.JWT_ACCESS_SECRET,
+  jwtRefreshSecret: env.JWT_REFRESH_SECRET,
+  cookieSecret: env.COOKIE_SECRET,
+  isProduction: env.NODE_ENV === 'production',
+});
 
 // Attempt database connection asynchronously
 if (env.NODE_ENV !== 'test') {
@@ -42,4 +48,7 @@ process.on('SIGINT', () => handleShutdown('SIGINT'));
 
 export * from './database';
 export * from './models';
+export * from './auth';
+export * from './middleware';
+export * from './routes';
 export { createApp };

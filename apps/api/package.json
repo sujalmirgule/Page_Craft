@@ -11,17 +11,25 @@
   },
   "dependencies": {
     "@pagecraft/config": "*",
+    "@pagecraft/permissions": "*",
     "@pagecraft/types": "*",
     "@pagecraft/validation": "*",
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "express": "^4.21.1",
+    "express-rate-limit": "^8.7.5",
     "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.12.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.9.0",
     "typescript": "^5.6.3"
   }
