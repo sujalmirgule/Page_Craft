@@ -283,3 +283,49 @@ export const PortfolioUpdateValidator = z.object({
 export const SlugReservationValidator = z.object({
   slug: z.string().min(3).max(50).regex(/^[a-z0-9-]+$/, 'Invalid slug format'),
 });
+
+export const PageCreateValidator = z.object({
+  title: z.string().min(1, 'Page title is required').max(100, 'Page title cannot exceed 100 characters'),
+  slug: z
+    .string()
+    .max(80, 'Page slug cannot exceed 80 characters')
+    .regex(/^[a-z0-9-]*$/, 'Slug must only contain lowercase alphanumeric characters and hyphens')
+    .optional()
+    .default(''),
+  isHomePage: z.boolean().optional().default(false),
+  isVisible: z.boolean().optional().default(true),
+  seoDescription: z.string().max(300, 'SEO description cannot exceed 300 characters').optional(),
+});
+
+export const PageUpdateValidator = z.object({
+  title: z.string().min(1, 'Page title cannot be empty').max(100, 'Page title cannot exceed 100 characters').optional(),
+  slug: z
+    .string()
+    .max(80, 'Page slug cannot exceed 80 characters')
+    .regex(/^[a-z0-9-]*$/, 'Slug must only contain lowercase alphanumeric characters and hyphens')
+    .optional(),
+  isHomePage: z.boolean().optional(),
+  isVisible: z.boolean().optional(),
+  seoDescription: z.string().max(300, 'SEO description cannot exceed 300 characters').optional(),
+});
+
+export const PageReorderValidator = z.object({
+  pageIds: z.array(z.string().min(1)).min(1, 'pageIds array cannot be empty'),
+});
+
+export const NavigationLinkValidator = z.object({
+  label: z.string().min(1, 'Navigation label is required').max(50, 'Navigation label cannot exceed 50 characters'),
+  pageId: z.string().min(1, 'pageId is required'),
+});
+
+export const NavigationUpdateValidator = z.object({
+  showNavbar: z.boolean().optional(),
+  sticky: z.boolean().optional(),
+  links: z.array(NavigationLinkValidator).optional(),
+});
+
+export const NavigationReorderValidator = z.object({
+  links: z.array(NavigationLinkValidator).optional(),
+  pageIds: z.array(z.string().min(1)).optional(),
+});
+

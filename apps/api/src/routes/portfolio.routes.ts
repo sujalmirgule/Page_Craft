@@ -13,6 +13,7 @@ import {
 import { createStarterPortfolio } from '@pagecraft/schema';
 import { can } from '@pagecraft/permissions';
 import type { ApiResponse } from '@pagecraft/types';
+import { registerPageAndNavigationRoutes } from './page.routes';
 
 export function createPortfolioRouter(jwtAccessSecret: string): Router {
   const router = Router();
@@ -402,6 +403,9 @@ export function createPortfolioRouter(jwtAccessSecret: string): Router {
       }
     }
   );
+
+  // Register nested Page CRUD and Navigation routes
+  registerPageAndNavigationRoutes(router);
 
   return router;
 }
