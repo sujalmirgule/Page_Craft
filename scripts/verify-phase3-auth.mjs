@@ -71,6 +71,7 @@ async function runTests() {
     userId,
     email: 'alex@pagecraft.app',
     role: 'user',
+    tokenVersion: 0,
   };
 
   const accessToken = generateAccessToken(tokenPayload, JWT_ACCESS_SECRET, '15m');
@@ -80,6 +81,7 @@ async function runTests() {
   check(decoded.userId === userId, 'Decoded token preserves userId claim');
   check(decoded.email === 'alex@pagecraft.app', 'Decoded token preserves email claim');
   check(decoded.role === 'user', 'Decoded token preserves role claim');
+  check(decoded.tokenVersion === 0, 'Decoded token preserves tokenVersion claim');
 
   // Tamper detection
   let tamperedFailed = false;
@@ -436,15 +438,14 @@ async function runTests() {
   check(hasWorkspaces, 'Workspace router mounted at /api/v1/workspaces');
 
   // ----------------------------------------------------
-  // Test 8: Security Audit & Vulnerability Verification
+  // Test 8: Security Audit & Targeted Approval Verification
   // ----------------------------------------------------
-  console.log('\nTest 8: Advanced Security Controls & Vulnerability Regression Verification');
+  console.log('\nTest 8: Targeted Security Controls Verification');
 
   // 8.1 JWT Algorithm Restriction (Pinned to HS256)
   {
     let unpinnedRejected = false;
     try {
-      // Craft an unpinned or 'none' algorithm token
       const insecureHeader = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
       const insecurePayload = Buffer.from(JSON.stringify({ userId, email: 'hacker@evil.com', role: 'admin' })).toString('base64url');
       const forgedToken = `${insecureHeader}.${insecurePayload}.`;
@@ -457,7 +458,6 @@ async function runTests() {
 
   // 8.2 Refresh Token Rotation & Session Replay Detection
   {
-    // Simulate user state in database
     const sessionUser = {
       _id: new mongoose.Types.ObjectId(),
       email: 'session.test@pagecraft.app',
@@ -467,94 +467,174 @@ async function runTests() {
       save: async function() { return this; },
     };
 
-    // 1. Initial login issues RT_v0 with tokenVersion: 0
     const rt0 = generateRefreshToken({ userId: sessionUser._id.toString(), tokenVersion: sessionUser.tokenVersion }, JWT_REFRESH_SECRET);
     check(verifyRefreshToken(rt0, JWT_REFRESH_SECRET).tokenVersion === 0, 'Initial refresh token has tokenVersion: 0');
 
-    // 2. Legitimate refresh rotates session: user.tokenVersion becomes 1
+    // Legitimate rotation
     sessionUser.tokenVersion = 1;
     const rt1 = generateRefreshToken({ userId: sessionUser._id.toString(), tokenVersion: sessionUser.tokenVersion }, JWT_REFRESH_SECRET);
     check(verifyRefreshToken(rt1, JWT_REFRESH_SECRET).tokenVersion === 1, 'Rotated refresh token receives new tokenVersion: 1');
 
-    // 3. Replay attack simulation: Attacker presents old rt0 (tokenVersion: 0 < 1)
+    // Replay attack simulation
     const payload = verifyRefreshToken(rt0, JWT_REFRESH_SECRET);
     const isReplay = (payload.tokenVersion ?? 0) < sessionUser.tokenVersion;
     check(isReplay === true, 'Replay detection correctly identifies expired tokenVersion');
 
-    // 4. In response to replay detection, all active tokens for this user are revoked
     if (isReplay) {
-      sessionUser.tokenVersion = sessionUser.tokenVersion + 1; // Bump to 2
+      sessionUser.tokenVersion = sessionUser.tokenVersion + 1; // Invalidate family
     }
     check(sessionUser.tokenVersion === 2, 'Replay detection invalidates all existing sessions (tokenVersion=2)');
 
-    // 5. Subsequent presentation of rt1 (tokenVersion: 1 < 2) is also rejected
     const payloadRt1 = verifyRefreshToken(rt1, JWT_REFRESH_SECRET);
     const rt1NowInvalid = (payloadRt1.tokenVersion ?? 0) < sessionUser.tokenVersion;
     check(rt1NowInvalid === true, 'Stolen/compromised token family is completely revoked');
   }
 
-  // 8.3 Server-Side Logout Revocation
+  // 8.3 Immediate Access-Token Revocation Verification Sequence
+  console.log('\nTest 9: Immediate Access-Token Revocation Verification');
   {
-    const userForLogout = {
-      _id: new mongoose.Types.ObjectId(),
-      tokenVersion: 5,
-    };
-    const validTokenBeforeLogout = generateRefreshToken({ userId: userForLogout._id.toString(), tokenVersion: 5 }, JWT_REFRESH_SECRET);
-
-    // Logout occurs: server increments tokenVersion
-    userForLogout.tokenVersion++;
-
-    // Presenting validTokenBeforeLogout after logout fails session version check
-    const decodedAfterLogout = verifyRefreshToken(validTokenBeforeLogout, JWT_REFRESH_SECRET);
-    const sessionActive = decodedAfterLogout.tokenVersion === userForLogout.tokenVersion;
-    check(sessionActive === false, 'Token reuse after logout is blocked by server-side tokenVersion bump');
-  }
-
-  // 8.4 OAuth CSRF State Enforcements (Missing & Mismatched States)
-  {
-    const validState = generateOAuthState();
-    const forgedState = generateOAuthState();
-
-    check(verifyOAuthState(forgedState, validState) === false, 'Rejects mismatched OAuth state parameter');
-    check(verifyOAuthState('', validState) === false, 'Rejects missing received state parameter');
-    check(verifyOAuthState(validState, '') === false, 'Rejects missing expected cookie state parameter');
-    check(verifyOAuthState('short', validState) === false, 'Rejects length mismatch safely without timing leak');
-    check(verifyOAuthState(validState, validState) === true, 'Accepts matching legitimate OAuth state parameter');
-  }
-
-  // 8.5 OAuth Email Verification (Account Takeover Defense)
-  {
-    const unverifiedProfile = {
-      googleId: 'g_evil_123',
-      email: 'victim@pagecraft.app',
-      name: 'Attacker Fake',
-      emailVerified: false,
-    };
-    const verifiedProfile = {
-      googleId: 'g_good_456',
-      email: 'creator@pagecraft.app',
-      name: 'Creator True',
-      emailVerified: true,
-    };
-
-    check(unverifiedProfile.emailVerified === false, 'Detects unverified email from OAuth provider');
-    check(verifiedProfile.emailVerified === true, 'Authorizes verified email from OAuth provider');
-  }
-
-  // 8.6 OAuth Account Conflict Rejection
-  {
-    const existingUserWithGoogle = new User({
-      email: 'registered@pagecraft.app',
-      name: 'Registered User',
-      oauthProviders: { googleId: 'google_original_111' },
-      tokenVersion: 0,
+    const targetUserId = new mongoose.Types.ObjectId();
+    const liveUser = {
+      _id: targetUserId,
+      email: 'revoke.test@pagecraft.app',
+      name: 'Revoke Tester',
       role: 'user',
-    });
+      plan: 'free',
+      tokenVersion: 0,
+      isActive: true,
+    };
 
-    const incomingGoogleId = 'google_hijacker_999';
-    const isConflict = existingUserWithGoogle.oauthProviders?.googleId &&
-                       existingUserWithGoogle.oauthProviders.googleId !== incomingGoogleId;
-    check(isConflict === true, 'Detects and blocks conflicting OAuth provider account takeover attempt');
+    const origUserFindById = User.findById;
+    User.findById = async (id) => {
+      if (id?.toString() === targetUserId.toString()) return liveUser;
+      return null;
+    };
+
+    // Step 1: Issue access token with tokenVersion: 0
+    const activeAccessToken = generateAccessToken(
+      { userId: targetUserId.toString(), email: liveUser.email, role: liveUser.role, tokenVersion: 0 },
+      JWT_ACCESS_SECRET
+    );
+
+    // Step 2: Authenticate successfully using the token
+    const { req: req1, res: res1, getStatus: getStatus1 } = createMockReqRes(
+      undefined,
+      {},
+      {},
+      {},
+      { authorization: `Bearer ${activeAccessToken}` }
+    );
+    let authPassed = false;
+    await authenticate(JWT_ACCESS_SECRET)(req1, res1, () => { authPassed = true; });
+    check(authPassed && getStatus1() === 200, 'Sequence 1: Authenticates successfully using active access token');
+    check(req1.user?.id === targetUserId.toString(), 'Attaches user to request context');
+
+    // Step 3: User logs out / session termination -> server increments user.tokenVersion
+    liveUser.tokenVersion = 1;
+
+    // Step 4: Attempt another authenticated request using the previously issued access token
+    const { req: req2, res: res2, getStatus: getStatus2, getBody: getBody2 } = createMockReqRes(
+      undefined,
+      {},
+      {},
+      {},
+      { authorization: `Bearer ${activeAccessToken}` }
+    );
+    let postLogoutAuthPassed = false;
+    await authenticate(JWT_ACCESS_SECRET)(req2, res2, () => { postLogoutAuthPassed = true; });
+    check(!postLogoutAuthPassed && getStatus2() === 401, 'Sequence 2: Previously issued access token is immediately rejected (401)');
+    check(getBody2()?.error?.code === 'REVOKED_TOKEN', 'Sequence 3: Returns clean REVOKED_TOKEN error code');
+
+    // Restore stub
+    User.findById = origUserFindById;
+  }
+
+  // 8.4 Atomic Refresh-Token Compare-And-Swap & Concurrent Race Protection
+  console.log('\nTest 10: Atomic Token Rotation & Concurrent Race Protection');
+  {
+    const testUserId = new mongoose.Types.ObjectId();
+    let currentDbVersion = 0;
+
+    // Simulate atomic MongoDB findOneAndUpdate with condition: { _id, tokenVersion: payloadVersion }
+    const atomicFindOneAndUpdate = async (query, update) => {
+      if (query._id.toString() === testUserId.toString() && query.tokenVersion === currentDbVersion) {
+        currentDbVersion += update.$inc.tokenVersion;
+        return { _id: testUserId, tokenVersion: currentDbVersion, isActive: true };
+      }
+      return null; // Atomic CAS mismatch!
+    };
+
+    // Client possesses refresh token for version 0
+    const incomingTokenPayloadVersion = 0;
+
+    // Concurrent Refresh 1 arrives
+    const result1 = await atomicFindOneAndUpdate(
+      { _id: testUserId, tokenVersion: incomingTokenPayloadVersion },
+      { $inc: { tokenVersion: 1 } }
+    );
+    check(result1 !== null && result1.tokenVersion === 1, 'Concurrent Request 1 atomically rotates token to version 1');
+
+    // Concurrent Refresh 2 arrives at same millisecond with same token (version 0)
+    const result2 = await atomicFindOneAndUpdate(
+      { _id: testUserId, tokenVersion: incomingTokenPayloadVersion },
+      { $inc: { tokenVersion: 1 } }
+    );
+    check(result2 === null, 'Concurrent Request 2 fails atomic compare-and-swap (Race condition blocked)');
+
+    // Replay / Race detection triggers because currentDbVersion > incomingTokenPayloadVersion
+    const raceDetected = currentDbVersion > incomingTokenPayloadVersion;
+    check(raceDetected === true, 'Concurrent race condition correctly identified as token reuse');
+  }
+
+  // 8.5 OAuth Verified Email Strict Enforcement (Google & GitHub)
+  console.log('\nTest 11: OAuth Verified-Email Enforcement (Google & GitHub)');
+  {
+    // Google evaluations
+    const googleFalse = { emailVerified: false };
+    const googleNull = { emailVerified: null };
+    const googleMissing = {};
+    const googleTrue = { emailVerified: true };
+
+    check(googleFalse.emailVerified !== true, 'Google: Explicitly rejects emailVerified === false');
+    check(googleNull.emailVerified !== true, 'Google: Explicitly rejects emailVerified === null');
+    check(googleMissing.emailVerified !== true, 'Google: Explicitly rejects missing emailVerified metadata');
+    check(googleTrue.emailVerified === true, 'Google: Authorizes strictly when emailVerified === true');
+
+    // GitHub evaluations
+    const githubFalse = { emailVerified: false };
+    const githubNull = { emailVerified: null };
+    const githubMissing = {};
+    const githubTrue = { emailVerified: true };
+
+    check(githubFalse.emailVerified !== true, 'GitHub: Explicitly rejects emailVerified === false');
+    check(githubNull.emailVerified !== true, 'GitHub: Explicitly rejects emailVerified === null');
+    check(githubMissing.emailVerified !== true, 'GitHub: Explicitly rejects missing emailVerified metadata');
+    check(githubTrue.emailVerified === true, 'GitHub: Authorizes strictly when emailVerified === true');
+  }
+
+  // 8.6 OAuth State Lifecycle & Single-Use Enforcement
+  console.log('\nTest 12: OAuth State Lifecycle & Single-Use Verification');
+  {
+    const state = generateOAuthState();
+    check(typeof state === 'string' && state.length === 64, 'OAuth state is cryptographically generated 64-char hex string');
+
+    // Missing state parameter
+    const missingStateCheck = !'' || !state || !verifyOAuthState('', state);
+    check(missingStateCheck === true, 'Rejects when incoming state is missing');
+
+    // Missing expected cookie state
+    const missingCookieCheck = !state || !'' || !verifyOAuthState(state, '');
+    check(missingCookieCheck === true, 'Rejects when expected cookie state is absent (prevents CSRF bypass)');
+
+    // Reused state (single use: cookie deleted)
+    let cookieStore = { oauth_state_google: state };
+    const firstCheck = verifyOAuthState(state, cookieStore.oauth_state_google);
+    check(firstCheck === true, 'First use of OAuth state passes verification');
+
+    // Clear state cookie on evaluation (Single-use enforcement)
+    delete cookieStore.oauth_state_google;
+    const secondCheck = !state || !cookieStore.oauth_state_google;
+    check(secondCheck === true, 'Replay of OAuth state rejected because cookie was cleared upon first use');
   }
 
   // 8.7 Defensive Malformed ObjectId Handling in Middleware

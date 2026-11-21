@@ -77,7 +77,28 @@ export function authenticate(jwtSecret = process.env.JWT_ACCESS_SECRET || 'dev_j
         return;
       }
 
-      // 5. Attach User to Request Context
+      // 5. Immediate Access-Token Revocation Verification (tokenVersion mismatch)
+      if (
+        payload.tokenVersion !== undefined &&
+        user.tokenVersion !== undefined &&
+        payload.tokenVersion !== user.tokenVersion
+      ) {
+        const response: ApiResponse = {
+          success: false,
+          error: {
+            code: 'REVOKED_TOKEN',
+            message: 'Access token has been revoked due to session termination or logout.',
+          },
+          meta: {
+            timestamp: new Date().toISOString(),
+            version: '1.0.0',
+          },
+        };
+        res.status(401).json(response);
+        return;
+      }
+
+      // 6. Attach User to Request Context
       req.user = {
         id: user._id.toString(),
         email: user.email,

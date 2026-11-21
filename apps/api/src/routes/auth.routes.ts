@@ -98,7 +98,7 @@ export function createAuthRouter(config: {
 
         // 5. Generate short-lived access token and initial refresh token
         const accessToken = generateAccessToken(
-          { userId: user._id.toString(), email: user.email, role: user.role },
+          { userId: user._id.toString(), email: user.email, role: user.role, tokenVersion: user.tokenVersion || 0 },
           jwtAccessSecret
         );
         const refreshToken = generateRefreshToken(
@@ -191,7 +191,7 @@ export function createAuthRouter(config: {
 
         // 3. Generate tokens with current tokenVersion
         const accessToken = generateAccessToken(
-          { userId: user._id.toString(), email: user.email, role: user.role },
+          { userId: user._id.toString(), email: user.email, role: user.role, tokenVersion: user.tokenVersion || 0 },
           jwtAccessSecret
         );
         const refreshToken = generateRefreshToken(
@@ -242,44 +242,54 @@ export function createAuthRouter(config: {
 
       // Verify token signature, audience, and HS256 algorithm
       const payload = verifyRefreshToken(token, jwtRefreshSecret);
-      const user = await User.findById(payload.userId);
-      if (!user || !user.isActive) {
-        res.status(401).json({
-          success: false,
-          error: { code: 'INVALID_SESSION', message: 'User session is no longer active' },
-        });
-        return;
-      }
-
-      const currentVersion = user.tokenVersion || 0;
       const payloadVersion = payload.tokenVersion ?? 0;
 
-      // REPLAY DETECTION:
-      // If presented tokenVersion is older than current active version, a revoked/replayed token is being used!
-      if (payloadVersion < currentVersion) {
-        // Invalidate all tokens for this user by incrementing tokenVersion again
-        user.tokenVersion = currentVersion + 1;
-        await user.save();
+      // ATOMIC COMPARE-AND-SWAP TOKEN ROTATION:
+      // Atomically find user matching current tokenVersion and increment it.
+      // This guarantees that concurrent refresh requests using the identical token cannot both succeed!
+      const user = await User.findOneAndUpdate(
+        { _id: payload.userId, tokenVersion: payloadVersion, isActive: true },
+        { $inc: { tokenVersion: 1 } },
+        { new: true }
+      );
 
-        res.clearCookie('refresh_token', getRefreshCookieOptions(isProduction));
+      if (!user) {
+        // Find if user exists to distinguish between inactive user vs token replay / concurrent race
+        const checkUser = await User.findById(payload.userId);
+        if (!checkUser || !checkUser.isActive) {
+          res.status(401).json({
+            success: false,
+            error: { code: 'INVALID_SESSION', message: 'User session is no longer active' },
+          });
+          return;
+        }
+
+        // If checkUser.tokenVersion > payloadVersion, token reuse/replay was attempted!
+        if ((checkUser.tokenVersion ?? 0) > payloadVersion) {
+          // Invalidate all tokens for this user by incrementing tokenVersion again
+          await User.findByIdAndUpdate(payload.userId, { $inc: { tokenVersion: 1 } });
+
+          res.clearCookie('refresh_token', getRefreshCookieOptions(isProduction));
+          res.status(401).json({
+            success: false,
+            error: {
+              code: 'TOKEN_REPLAY_DETECTED',
+              message: 'Refresh token reuse detected. All sessions for this account have been invalidated for security.',
+            },
+          });
+          return;
+        }
+
         res.status(401).json({
           success: false,
-          error: {
-            code: 'TOKEN_REPLAY_DETECTED',
-            message: 'Refresh token reuse detected. All sessions for this account have been invalidated for security.',
-          },
+          error: { code: 'INVALID_REFRESH_TOKEN', message: 'Refresh token is expired, invalid, or malformed' },
         });
         return;
       }
 
-      // REFRESH TOKEN ROTATION:
-      // Increment tokenVersion in database to immediately invalidate the presented token
-      user.tokenVersion = currentVersion + 1;
-      await user.save();
-
-      // Issue fresh access token and newly rotated refresh token
+      // Issue fresh access token (with new tokenVersion) and newly rotated refresh token
       const newAccessToken = generateAccessToken(
-        { userId: user._id.toString(), email: user.email, role: user.role },
+        { userId: user._id.toString(), email: user.email, role: user.role, tokenVersion: user.tokenVersion },
         jwtAccessSecret
       );
       const newRefreshToken = generateRefreshToken(
@@ -424,13 +434,13 @@ export function createAuthRouter(config: {
             emailVerified: true,
           };
 
-      // Verified email validation: Reject unverified emails to prevent account takeover
-      if (googleProfile.emailVerified === false) {
+      // Verified email validation: Reject unverified or missing email verification metadata
+      if (googleProfile.emailVerified !== true) {
         res.status(400).json({
           success: false,
           error: {
             code: 'OAUTH_EMAIL_UNVERIFIED',
-            message: 'The email address associated with your Google account is not verified. Account linking denied.',
+            message: 'The email address associated with your Google account is not verified by Google or lacks verification metadata. Account linking denied.',
           },
         });
         return;
@@ -481,7 +491,7 @@ export function createAuthRouter(config: {
       }
 
       const accessToken = generateAccessToken(
-        { userId: user._id.toString(), email: user.email, role: user.role },
+        { userId: user._id.toString(), email: user.email, role: user.role, tokenVersion: user.tokenVersion || 0 },
         jwtAccessSecret
       );
       const refreshToken = generateRefreshToken(
@@ -553,13 +563,13 @@ export function createAuthRouter(config: {
             emailVerified: true,
           };
 
-      // Verified email validation: Reject unverified emails
-      if (githubProfile.emailVerified === false) {
+      // Verified email validation: Reject unverified or missing email verification metadata
+      if (githubProfile.emailVerified !== true) {
         res.status(400).json({
           success: false,
           error: {
             code: 'OAUTH_EMAIL_UNVERIFIED',
-            message: 'The email address associated with your GitHub account is not verified. Account linking denied.',
+            message: 'The email address associated with your GitHub account is not verified by GitHub or lacks verification metadata. Account linking denied.',
           },
         });
         return;
@@ -610,7 +620,7 @@ export function createAuthRouter(config: {
       }
 
       const accessToken = generateAccessToken(
-        { userId: user._id.toString(), email: user.email, role: user.role },
+        { userId: user._id.toString(), email: user.email, role: user.role, tokenVersion: user.tokenVersion || 0 },
         jwtAccessSecret
       );
       const refreshToken = generateRefreshToken(
